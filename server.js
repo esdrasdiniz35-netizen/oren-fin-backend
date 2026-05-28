@@ -202,18 +202,21 @@ app.post('/salvar', async (req, res) => {
 app.post('/chat', async (req, res) => {
   const { mensagem, historico = [], contexto = {}, session_id = 'default' } = req.body;
 
+  // Garante que contexto nunca é null
+  const ctx = contexto || {}
+
   // Monta system prompt com contexto real
   const systemPromptFinal = SYSTEM_PROMPT
-    .replace('{estabelecimento}', contexto.estabelecimento || '')
-    .replace('{segmento}', contexto.segmento || '')
-    .replace('{servicos_salao}', contexto.servicos_salao || '')
-    .replace('{servicos_veterinarios}', contexto.servicos_veterinarios || '')
-    .replace('{produtos}', contexto.produtos || '')
-    .replace('{taxa_credito}', contexto.taxa_credito || '0')
-    .replace('{taxa_debito}', contexto.taxa_debito || '0')
-    .replace('{taxa_adiantamento}', contexto.taxa_adiantamento || '0')
-    .replace('{comissao_padrao}', contexto.comissao_padrao || '0')
-    .replace('{contexto_sheets}', contexto.contexto || '');
+    .replace('{estabelecimento}', ctx.estabelecimento || '')
+    .replace('{segmento}', ctx.segmento || '')
+    .replace('{servicos_salao}', ctx.servicos_salao || '')
+    .replace('{servicos_veterinarios}', ctx.servicos_veterinarios || '')
+    .replace('{produtos}', ctx.produtos || '')
+    .replace('{taxa_credito}', ctx.taxa_credito || '0')
+    .replace('{taxa_debito}', ctx.taxa_debito || '0')
+    .replace('{taxa_adiantamento}', ctx.taxa_adiantamento || '0')
+    .replace('{comissao_padrao}', ctx.comissao_padrao || '0')
+    .replace('{contexto_sheets}', ctx.contexto || '');
 
   // Monta histórico no formato Anthropic
   const messages = [
