@@ -8,16 +8,29 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ============================================================
-// CORS — permite frontend Vercel + localhost dev
+// CORS — aceita frontend Vercel + localhost dev
 // ============================================================
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || 'http://localhost:5173',
-    'http://localhost:5173',
-    'http://localhost:3000'
-  ],
-  credentials: true
+  origin: function(origin, callback) {
+    const allowed = [
+      process.env.FRONTEND_URL,
+      'http://localhost:5173',
+      'http://localhost:3000',
+      'https://oren-fin-frontend.vercel.app'
+    ].filter(Boolean);
+    if (!origin || allowed.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // permissivo por enquanto
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Responde preflight OPTIONS explicitamente
+app.options('*', cors());
 
 app.use(express.json());
 
@@ -240,12 +253,27 @@ app.post('/chat', async (req, res) => {
       messages
     });
 
+    // Acumula resposta completa ANTES de streamar — evita vazar GERAR_PDF pro cliente
     for await (const chunk of stream) {
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-        const texto = chunk.delta.text;
-        respostaCompleta += texto;
-        res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: texto })}\n\n`);
+        respostaCompleta += chunk.delta.text;
       }
+    }
+
+    // Remove blocos estruturais antes de enviar pro cliente
+    const temGeraPdf = respostaCompleta.includes('GERAR_PDF:');
+    let textoParaStream = respostaCompleta;
+    const idxPdf = textoParaStream.indexOf('GERAR_PDF:');
+    if (idxPdf !== -1) textoParaStream = textoParaStream.slice(0, idxPdf);
+    const idxReg = textoParaStream.indexOf('DADOS_REGISTRO:');
+    if (idxReg !== -1) textoParaStream = textoParaStream.slice(0, idxReg);
+    textoParaStream = textoParaStream.trim();
+
+    // Streama o texto limpo pro cliente
+    if (textoParaStream) {
+      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoParaStream })}
+
+`);
     }
 
     // Extrai DADOS_REGISTRO se existir
