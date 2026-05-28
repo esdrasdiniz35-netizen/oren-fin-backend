@@ -162,11 +162,25 @@ Regras do DADOS_REGISTRO:
 - O JSON deve ser válido, sem quebras de linha internas, numa única linha após DADOS_REGISTRO:
 
 GERAÇÃO DE PDF
-Quando o cliente confirmar que quer PDF, inclua ao final:
+Quando o cliente confirmar que quer PDF, responda "📊 Gerando seu PDF, um momento..." e inclua ao final numa linha separada:
 GERAR_PDF:{"tipo":"[endpoint]","dados":{...}}
 
-Endpoints: resumo-dia, resumo-mensal, dre, contabil-detalhado, comparativo, ranking-servicos, personalizado
-Nunca inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta.`;
+REGRA CRÍTICA DO PDF: Preencha os dados com os valores REAIS do contexto. Nunca use 0 para totais — leia os valores calculados no bloco RESUMO DO DIA ou LANÇAMENTOS do contexto.
+
+Estrutura obrigatória por endpoint:
+
+resumo-dia → {"estabelecimento":"[nome]","data":"[dd/mm/aaaa]","entradas":[numero do contexto],"saidas":[numero do contexto],"lancamentos":[{"horario":"","descricao":"texto","categoria":"texto","tipo":"receita ou despesa","valor":numero}]}
+
+resumo-mensal → {"estabelecimento":"[nome]","periodo":"[MM/AAAA]","receita_total":[numero],"despesas_totais":[numero],"lucro_liquido":[numero],"categorias":[{"nome":"texto","descricao":"texto","valor":numero}]}
+
+dre → {"estabelecimento":"[nome]","periodo":"[texto]","itens":{"receita_bruta":[{"nome":"texto","valor":numero}],"total_receita_bruta":[numero],"deducoes":[],"total_deducoes":0,"receita_liquida":[numero],"cmv":[],"total_cmv":0,"lucro_bruto":[numero],"despesas_op":[{"nome":"texto","valor":numero}],"total_despesas_op":[numero],"lucro_liquido":[numero]}}
+
+contabil-detalhado → {"estabelecimento":"[nome]","periodo":"[texto]","resumo":{"receita_total":[numero],"despesas_totais":[numero],"lucro_liquido":[numero],"margem":"[XX%]"},"receitas":[{"data":"texto","descricao":"texto","categoria":"texto","forma_pagamento":"texto","bruto":numero,"taxa":numero,"liquido":numero}],"despesas":[{"data":"texto","descricao":"texto","categoria":"texto","forma_pagamento":"texto","bruto":numero,"taxa":numero,"liquido":numero}]}
+
+ranking-servicos → {"estabelecimento":"[nome]","periodo":"[texto]","servicos":[{"nome":"texto","receita":numero,"quantidade":numero}]}
+
+Nunca inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta.
+Se o cliente pedir PDF explicitamente, gere direto sem perguntar formato.`;
 
 // ============================================================
 // HEALTH CHECK
