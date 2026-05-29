@@ -82,7 +82,17 @@ RELATÓRIO — quando solicitado, sempre pergunta primeiro: "Prefere receber as 
 PACOTES — registra pacotes pré-pagos, controla sessões utilizadas e restantes, avisa quando restar 1, encerra automaticamente quando zerar.
 CLIENTES — o sistema cadastra automaticamente. Sua responsabilidade é apenas identificar duplicatas.
 FUNCIONÁRIOS — cadastra nome, cargo e percentual de comissão. Calcula comissão por período quando solicitado.
-CORRIGIR LANÇAMENTO — nunca apaga. Inativa o lançamento errado informando o ID e cria novo corrigido.
+CORRIGIR LANÇAMENTO — nunca apaga. Quando o cliente pedir pra corrigir um lançamento:
+1. Busca o lançamento nos ÚLTIMOS LANÇAMENTOS do contexto pelo ID — formato [ID:xxxxxxxxx]
+2. Manda DOIS blocos DADOS_REGISTRO separados: primeiro inativa_lancamento com o id_lancamento, depois registrar_lancamento com os dados corretos
+3. Confirma a correção mostrando o valor antigo e o novo
+
+Exemplo de resposta ao corrigir:
+✅ Corrigido! Banho do Thor: R$ 50,00 → R$ 60,00
+DADOS_REGISTRO:{"acao":"inativar_lancamento","id_lancamento":"1780013115898","descricao":"Banho - Thor"}
+DADOS_REGISTRO:{"acao":"registrar_lancamento","tipo":"receita","descricao":"Banho - Thor","categoria":"servicos_salao","forma_pagamento":"dinheiro","bruto":60,"taxa":0,"liquido":0,"cliente":"","animal":"Thor"}
+
+REGRA: sempre inclua o id_lancamento ao inativar. Nunca inativa sem ID.
 HISTÓRICO — lista registros ativos de forma organizada usando os dados do contexto.
 ADICIONAR SERVIÇO — quando o cliente mencionar serviço ou produto novo, registra e adiciona na lista.
 
@@ -291,8 +301,9 @@ app.post('/chat', async (req, res) => {
     }
 
     // Extrai DADOS_REGISTRO se existir
-    const matchRegistro = respostaCompleta.match(/DADOS_REGISTRO:(\{.*?\})/s);
-    const matchPdf = respostaCompleta.match(/GERAR_PDF:(\{[\s\S]*\})/);
+    // Extrai TODOS os DADOS_REGISTRO (pode ter mais de um para correções)
+    const todosRegistros = [...respostaCompleta.matchAll(/DADOS_REGISTRO:({[^\n]+})/g)];
+    const matchPdf = respostaCompleta.match(/GERAR_PDF:({[\s\S]*})/)
 
     // Texto limpo para exibir
     const textoLimpo = respostaCompleta
@@ -300,7 +311,7 @@ app.post('/chat', async (req, res) => {
       .replace(/\nGERAR_PDF:[\s\S]*$/, '')
       .trim();
 
-    // Salva no Apps Script em background
+    // Salva no Apps Script em background (processa todos os DADOS_REGISTRO)
     const dadosParaSalvar = {
       texto: respostaCompleta,
       session_id,
@@ -314,7 +325,7 @@ app.post('/chat', async (req, res) => {
     res.write(`data: ${JSON.stringify({
       tipo: 'fim',
       texto_completo: textoLimpo,
-      tem_registro: !!matchRegistro,
+      tem_registro: todosRegistros.length > 0,
       tem_pdf: !!matchPdf,
       dados_pdf: matchPdf ? matchPdf[1] : null
     })}\n\n`);
