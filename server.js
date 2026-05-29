@@ -197,6 +197,11 @@ DADOS_REGISTRO:{"acao":"[acao]","tipo":"[receita/despesa]","descricao":"[texto]"
 
 Ações possíveis: registrar_lancamento, registrar_cliente, atualizar_cliente, registrar_pacote, usar_sessao, registrar_lembrete, inativar_lancamento, adicionar_servico, registrar_funcionario, criar_evento, criar_evento_recorrente, cancelar_evento
 
+Regras do cancelar_evento:
+- Para cancelar um evento avulso: inclua "data" no DADOS_REGISTRO (YYYY-MM-DD)
+- Para cancelar todos os eventos recorrentes (ou "apagar tudo" / "desmarcar todos"): omita o campo "data" — o sistema cancela todos os eventos com aquele título nos próximos 365 dias
+- Confirme ao usuário quantos eventos foram cancelados
+
 Regras do DADOS_REGISTRO:
 - "bruto" deve ser preenchido com o valor informado pelo cliente
 - "taxa" e "liquido" devem ser sempre 0 — o sistema calcula automaticamente
