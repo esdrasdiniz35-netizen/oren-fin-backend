@@ -90,6 +90,7 @@ Sempre mande TRÊS blocos DADOS_REGISTRO nesta ordem:
 Exemplo quando o cliente compra e já usa uma sessão:
 DADOS_REGISTRO:{"acao":"registrar_lancamento","tipo":"receita","descricao":"Pacote Banho + Hidratação - Jade","categoria":"servicos_salao","forma_pagamento":"credito_avista","bruto":310,"taxa":0,"liquido":0,"cliente":"Carlos","animal":"Jade","id_cliente":""}
 DADOS_REGISTRO:{"acao":"registrar_pacote","cliente":"Carlos","relacionado":"Jade","animal":"Jade","servico":"Banho + Hidratação","sessoes_total":5,"valor_total":310,"data_lancamento":"2026-05-29"}
+DADOS_REGISTRO:{"acao":"usar_sessao","cliente":"Carlos","relacionado":"Jade","animal":"Jade","servico":"Banho + Hidratação","data_lancamento":"2026-05-29"}
 DADOS_REGISTRO:{"acao":"usar_sessao","cliente":"Carlos","relacionado":"Jade","animal":"Jade","servico":"Banho + Hidratação"}
 
 Quando cliente usa uma sessão avulsa (sem compra nova):
