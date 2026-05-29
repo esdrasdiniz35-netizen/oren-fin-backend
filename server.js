@@ -180,7 +180,7 @@ Banho - Sol · R$ 58,79 · crédito · Vanessa
 **Sessões de pacote:**
 Banho (pacote) - Nina · Ana Luiza (restam 3)
 
-Total atendimentos pagos: X
+Total de banhos do dia: X (use o valor ATENDIMENTOS do contexto — 1 por animal, independente do serviço)
 Total sessões de pacote: X
 Total geral: X
 
@@ -188,6 +188,8 @@ Por tipo de serviço:
 Banho: X
 Banho e Tosa: X
 [outros tipos]: X
+
+IMPORTANTE: atendimento = 1 por animal. Banho e Tosa, Banho e Hidratação — todos contam como 1 banho. Use sempre o valor de ATENDIMENTOS calculado pelo sistema, nunca conte manualmente.
 
 NUNCA omita o bloco de sessões de pacote quando houver pacotes com uso na data de hoje.
 
