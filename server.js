@@ -3,12 +3,64 @@ const express = require('express');
 const cors = require('cors');
 const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ============================================================
-// CORS — aceita frontend Vercel + localhost dev
+// GOOGLE SHEETS — Service Account
+// ============================================================
+const MASTER_SPREADSHEET_ID = process.env.MASTER_SPREADSHEET_ID;
+
+function getGoogleAuth() {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  return new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly']
+  });
+}
+
+// Cache em memória: slug → apps_script_url
+// Evita buscar na planilha mestre a cada requisição
+const clienteCache = new Map();
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+async function getAppsScriptUrl(slug) {
+  // Verifica cache
+  const cached = clienteCache.get(slug);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.url;
+  }
+
+  // Busca na planilha mestre
+  const auth = getGoogleAuth();
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: MASTER_SPREADSHEET_ID,
+    range: 'clientes!A:F'
+  });
+
+  const rows = response.data.values || [];
+  // Linha 0 é cabeçalho, começa em 1
+  for (let i = 1; i < rows.length; i++) {
+    const [rowSlug, rowUrl, , , rowStatus] = rows[i];
+    if (rowSlug === slug) {
+      if (rowStatus !== 'ativo') {
+        throw new Error(`Cliente ${slug} não está ativo`);
+      }
+      // Salva no cache
+      clienteCache.set(slug, { url: rowUrl, ts: Date.now() });
+      return rowUrl;
+    }
+  }
+
+  throw new Error(`Cliente não encontrado: ${slug}`);
+}
+
+// ============================================================
+// CORS — aceita frontend Vercel + localhost dev + subdomínios orenia
 // ============================================================
 app.use(cors({
   origin: function(origin, callback) {
@@ -18,7 +70,9 @@ app.use(cors({
       'http://localhost:3000',
       'https://oren-fin-frontend.vercel.app'
     ].filter(Boolean);
-    if (!origin || allowed.includes(origin)) {
+
+    // Aceita qualquer subdomínio *.orenia.com.br
+    if (!origin || allowed.includes(origin) || /\.orenia\.com\.br$/.test(origin)) {
       callback(null, true);
     } else {
       callback(null, true); // permissivo por enquanto
@@ -26,22 +80,46 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-client-slug']
 }));
 
-// Responde preflight OPTIONS explicitamente
 app.options('*', cors());
-
 app.use(express.json());
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
 });
 
-const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
+// APPS_SCRIPT_URL hardcoded — mantido como fallback para Pet House
+// enquanto a migração não estiver 100% validada
+const APPS_SCRIPT_URL_FALLBACK = process.env.APPS_SCRIPT_URL;
 
 // ============================================================
-// SYSTEM PROMPT — carregado uma vez, reutilizado em todas as calls
+// HELPER — resolve a URL correta para o slug recebido
+// Fallback: se não vier slug, usa a URL hardcoded (Pet House)
+// ============================================================
+async function resolveAppsScriptUrl(slug) {
+  if (!slug) {
+    console.log('[resolveAppsScriptUrl] Sem slug — usando fallback Pet House');
+    return APPS_SCRIPT_URL_FALLBACK;
+  }
+  try {
+    const url = await getAppsScriptUrl(slug);
+    console.log(`[resolveAppsScriptUrl] slug=${slug} → ${url}`);
+    return url;
+  } catch (err) {
+    console.error(`[resolveAppsScriptUrl] Erro para slug=${slug}:`, err.message);
+    // Se falhar a busca, tenta fallback só se for o slug da Pet House
+    if (slug === 'pethousebh4821') {
+      console.log('[resolveAppsScriptUrl] Usando fallback para Pet House');
+      return APPS_SCRIPT_URL_FALLBACK;
+    }
+    throw err;
+  }
+}
+
+// ============================================================
+// SYSTEM PROMPT
 // ============================================================
 const SYSTEM_PROMPT = `Você é o Fin, assistente financeiro inteligente da Oren IA. Criado para ajudar donos de pequenos negócios a controlar suas finanças de forma simples, conversando em linguagem natural — sem planilha, sem sistema complexo, sem treinamento.
 
@@ -311,28 +389,32 @@ app.get('/health', (req, res) => {
 });
 
 // ============================================================
-// GET /contexto — busca contexto do Apps Script
+// GET /contexto — busca contexto do Apps Script do cliente
 // ============================================================
 app.get('/contexto', async (req, res) => {
+  const { session_id = 'default', slug } = req.query;
+
   try {
-    const { session_id = 'default' } = req.query;
-    const response = await axios.get(`${APPS_SCRIPT_URL}?session_id=${session_id}`, {
+    const appsScriptUrl = await resolveAppsScriptUrl(slug);
+    const response = await axios.get(`${appsScriptUrl}?session_id=${session_id}`, {
       timeout: 15000
     });
     res.json(response.data);
   } catch (err) {
     console.error('Erro ao buscar contexto:', err.message);
-    res.status(500).json({ sucesso: false, erro: 'Erro ao buscar contexto' });
+    res.status(500).json({ sucesso: false, erro: err.message });
   }
 });
 
 // ============================================================
-// POST /salvar — salva histórico e processa registro no Apps Script
+// POST /salvar — salva histórico e processa registro no Apps Script do cliente
 // ============================================================
 app.post('/salvar', async (req, res) => {
+  const { texto, session_id = 'default', mensagem_usuario = '', slug } = req.body;
+
   try {
-    const { texto, session_id = 'default', mensagem_usuario = '' } = req.body;
-    const response = await axios.post(APPS_SCRIPT_URL, {
+    const appsScriptUrl = await resolveAppsScriptUrl(slug);
+    const response = await axios.post(appsScriptUrl, {
       texto,
       session_id,
       mensagem_usuario
@@ -340,7 +422,7 @@ app.post('/salvar', async (req, res) => {
     res.json(response.data);
   } catch (err) {
     console.error('Erro ao salvar:', err.message);
-    res.status(500).json({ sucesso: false, erro: 'Erro ao salvar dados' });
+    res.status(500).json({ sucesso: false, erro: err.message });
   }
 });
 
@@ -348,12 +430,10 @@ app.post('/salvar', async (req, res) => {
 // POST /chat — endpoint principal com streaming
 // ============================================================
 app.post('/chat', async (req, res) => {
-  const { mensagem, historico = [], contexto = {}, session_id = 'default' } = req.body;
+  const { mensagem, historico = [], contexto = {}, session_id = 'default', slug } = req.body;
 
-  // Garante que contexto nunca é null
-  const ctx = contexto || {}
+  const ctx = contexto || {};
 
-  // Monta system prompt com contexto real
   const systemPromptFinal = SYSTEM_PROMPT
     .replace('{estabelecimento}', ctx.estabelecimento || '')
     .replace('{segmento}', ctx.segmento || '')
@@ -366,13 +446,11 @@ app.post('/chat', async (req, res) => {
     .replace('{comissao_padrao}', ctx.comissao_padrao || '0')
     .replace('{contexto_sheets}', ctx.contexto || '');
 
-  // Monta histórico no formato Anthropic
   const messages = [
     ...historico,
     { role: 'user', content: mensagem }
   ];
 
-  // Configura SSE para streaming
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -381,6 +459,9 @@ app.post('/chat', async (req, res) => {
   let respostaCompleta = '';
 
   try {
+    // Resolve a URL antes de iniciar o stream
+    const appsScriptUrl = await resolveAppsScriptUrl(slug);
+
     const stream = await anthropic.messages.stream({
       model: 'claude-sonnet-4-6',
       max_tokens: 1024,
@@ -388,14 +469,12 @@ app.post('/chat', async (req, res) => {
       messages
     });
 
-    // Acumula resposta completa ANTES de streamar — evita vazar GERAR_PDF pro cliente
     for await (const chunk of stream) {
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
         respostaCompleta += chunk.delta.text;
       }
     }
 
-    // Remove blocos estruturais antes de enviar pro cliente
     const temGeraPdf = respostaCompleta.includes('GERAR_PDF:');
     let textoParaStream = respostaCompleta;
     const idxPdf = textoParaStream.indexOf('GERAR_PDF:');
@@ -404,35 +483,26 @@ app.post('/chat', async (req, res) => {
     if (idxReg !== -1) textoParaStream = textoParaStream.slice(0, idxReg);
     textoParaStream = textoParaStream.trim();
 
-    // Streama o texto limpo pro cliente
     if (textoParaStream) {
-      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoParaStream })}
-
-`);
+      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoParaStream })}\n\n`);
     }
 
-    // Extrai DADOS_REGISTRO se existir
-    // Extrai TODOS os DADOS_REGISTRO (pode ter mais de um para correções)
     const todosRegistros = [...respostaCompleta.matchAll(/DADOS_REGISTRO:({[^\n]+})/g)];
-    const matchPdf = respostaCompleta.match(/GERAR_PDF:({[\s\S]*})/)
+    const matchPdf = respostaCompleta.match(/GERAR_PDF:({[\s\S]*})/);
 
-    // Texto limpo para exibir
     const textoLimpo = respostaCompleta
       .replace(/\nDADOS_REGISTRO:[\s\S]*$/, '')
       .replace(/\nGERAR_PDF:[\s\S]*$/, '')
       .trim();
 
-    // Salva no Apps Script em background (processa todos os DADOS_REGISTRO)
-    const dadosParaSalvar = {
+    // Salva no Apps Script do cliente correto
+    axios.post(appsScriptUrl, {
       texto: respostaCompleta,
       session_id,
       mensagem_usuario: mensagem
-    };
-
-    axios.post(APPS_SCRIPT_URL, dadosParaSalvar, { timeout: 15000 })
+    }, { timeout: 15000 })
       .catch(err => console.error('Erro ao salvar histórico:', err.message));
 
-    // Sinaliza fim do stream com metadados
     res.write(`data: ${JSON.stringify({
       tipo: 'fim',
       texto_completo: textoLimpo,
@@ -451,7 +521,7 @@ app.post('/chat', async (req, res) => {
 });
 
 // ============================================================
-// POST /pdf — proxy pro PDF service existente no Railway
+// POST /pdf — proxy pro PDF service
 // ============================================================
 app.post('/pdf/:tipo', async (req, res) => {
   try {
