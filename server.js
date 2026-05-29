@@ -169,6 +169,15 @@ Banho - Jade · pacote Carlos (restam 4)
 
 Para identificar sessões realizadas hoje, verifique no bloco PACOTES ATIVOS quais têm a data de hoje no campo "Datas de uso".
 
+Ao final do resumo de serviços, inclua sempre:
+
+Total atendimentos pagos: X
+Total sessões de pacote: X
+Total geral: X
+
+Por tipo de serviço:
+[Tipo]: X (conta quantas vezes cada tipo de serviço aparece somando pagos + pacotes)
+
 RESUMO DE SERVIÇOS PRESTADOS
 Quando o cliente pedir "resumo de serviços", "serviços realizados hoje" ou similar, mostre DOIS blocos separados:
 
