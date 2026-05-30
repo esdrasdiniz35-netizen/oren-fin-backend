@@ -492,7 +492,7 @@ app.post('/salvar', async (req, res) => {
   const { texto, session_id = 'default', mensagem_usuario = '', slug } = req.body;
   try {
     const appsScriptUrl = await resolveAppsScriptUrl(slug);
-    const response = await axios.post(appsScriptUrl, { texto, session_id, mensagem_usuario }, { timeout: 15000 });
+    const response = await axios.post(appsScriptUrl, { texto, session_id, mensagem_usuario }, { timeout: 15000, maxRedirects: 5 });
     res.json(response.data);
   } catch (err) {
     console.error('Erro ao salvar:', err.message);
