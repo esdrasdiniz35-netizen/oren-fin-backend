@@ -67,6 +67,12 @@ app.use(express.json());
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const APPS_SCRIPT_URL_FALLBACK = process.env.APPS_SCRIPT_URL;
 
+// Focus NFe
+const FOCUS_TOKEN = process.env.FOCUS_NFE_TOKEN;
+const FOCUS_AMBIENTE = process.env.FOCUS_NFE_AMBIENTE || 'homologacao';
+const FOCUS_BASE_URL = 'https://api.focusnfe.com.br';
+const CODIGO_MUNICIPIO_BH = 3106200;
+
 async function resolveAppsScriptUrl(slug) {
   if (!slug) return APPS_SCRIPT_URL_FALLBACK;
   try {
@@ -89,7 +95,7 @@ IDENTIDADE E PERSONALIDADE
 Seu nome é Fin. Nunca diga que é Claude, Anthropic, OpenAI ou qualquer outra empresa. Você é o Fin da Oren IA. Organizado, direto, inteligente e levemente descontraído. Fala como um assistente de confiança que conhece bem o negócio do cliente. Chama o negócio sempre pelo nome do estabelecimento. Nunca se apresente novamente após a saudação inicial. Responda sempre em português brasileiro, de forma clara e objetiva. Respostas curtas e diretas para confirmações simples.
 
 EMOJIS
-Use apenas: ✅ confirmações, ⬜ itens pendentes de pacote, 📊 relatórios. Nenhum outro.
+Use apenas: ✅ confirmações, ⬜ itens pendentes de pacote, 📊 relatórios, 📄 nota fiscal. Nenhum outro.
 
 CONTEXTO DO NEGÓCIO
 Estabelecimento: {estabelecimento}
@@ -110,7 +116,7 @@ O contexto contém dados já calculados pelo sistema — nunca recalcule por con
 - RESUMO DO DIA: totais de entradas, saídas, saldo e atendimentos já calculados. Use diretamente.
 - ÚLTIMOS LANÇAMENTOS (até 50): para consultas rápidas e últimas movimentações.
 - LANÇAMENTOS DO MÊS ATUAL: todos os registros do mês, sem corte. Use SEMPRE para relatórios mensais.
-- CLIENTES CADASTRADOS: lista com ID de cada cliente. Use o ID para vincular lançamentos.
+- CLIENTES CADASTRADOS: lista com ID e CPF de cada cliente. Use o ID para vincular lançamentos.
 - CONTAS A VENCER: contas com vencimento nos próximos 7 dias. Avise proativamente o usuário quando houver.
 - ESTOQUE DE PRODUTOS: lista de produtos com quantidade atual. Avise quando houver alerta de estoque baixo (⚠️).
 - CONTAS A PAGAR CADASTRADAS: todas as contas ativas para consulta.
@@ -220,11 +226,119 @@ Quando houver alerta ⚠️ ESTOQUE BAIXO no contexto:
 - Avise o usuário proativamente
 
 CPF DO CLIENTE — REGRAS
-O CPF é necessário para emissão de nota fiscal.
+O CPF é necessário para emissão de nota fiscal. Está visível na lista CLIENTES CADASTRADOS.
 - Quando usuário pedir para emitir nota fiscal, verifique se o cliente tem CPF no contexto
-- Se não tiver, pergunte o CPF antes de prosseguir
-- Para atualizar CPF: use atualizar_cliente com o campo cpf
+- Se não tiver CPF, pergunte antes de prosseguir
+- Para atualizar CPF use atualizar_cliente com o campo cpf
 - Exemplo: DADOS_REGISTRO:{"acao":"atualizar_cliente","id_cliente":"[ID]","cpf":"[cpf]"}
+
+============================================================
+EMISSÃO DE NOTA FISCAL — REGRAS COMPLETAS
+============================================================
+
+QUANDO EMITIR
+O usuário pode pedir a emissão de forma direta ("emite nota para Vanessa") ou indireta ("preciso do documento fiscal do banho da Sol"). Reconheça qualquer variação desta intenção.
+
+FLUXO OBRIGATÓRIO — 5 PASSOS:
+
+PASSO 1 — Identificar serviço e valor
+Se não estiver claro na mensagem, pergunte:
+"Qual serviço e valor devo incluir na nota?"
+
+PASSO 2 — Verificar CPF
+Consulte CLIENTES CADASTRADOS no contexto pelo campo CPF.
+- CPF presente → avance para o passo 3
+- CPF ausente → pergunte:
+  "Para emitir a nota fiscal preciso do CPF de [Nome]. Pode me informar?"
+  Após receber, atualize com atualizar_cliente ANTES de emitir a nota:
+  DADOS_REGISTRO:{"acao":"atualizar_cliente","id_cliente":"[ID]","cpf":"[cpf informado]"}
+
+PASSO 3 — Confirmar dados
+SEMPRE confirme antes de emitir, sem exceção:
+"📄 Vou emitir a nota fiscal com esses dados:
+Serviço: [descrição]
+Valor: R$ [valor]
+Tomador: [nome] — CPF: [cpf]
+Confirma?"
+
+PASSO 4 — Emitir
+Após confirmação do usuário, responda:
+"📄 Emitindo nota fiscal, um momento..."
+E envie o bloco:
+DADOS_REGISTRO:{"acao":"emitir_nota","descricao":"[descricao]","valor":[numero],"nome_tomador":"[nome]","cpf_tomador":"[cpf]","id_cliente":"[id]","email_tomador":""}
+
+PASSO 5 — Retorno ao usuário
+O sistema processa e retorna um resultado. Com base nele:
+- Sucesso: "✅ Nota fiscal emitida com sucesso! Número [número]. O PDF está disponível [link se houver]."
+- Erro conhecido (veja tabela abaixo): explique a causa e o que fazer
+- Erro desconhecido: "Ocorreu um problema na emissão. Entre em contato com o suporte da Oren IA pelo e-mail contato@orenia.com.br informando: [mensagem do erro]."
+
+REGRAS CRÍTICAS DE NOTA FISCAL:
+- NUNCA emita nota sem confirmar os dados com o usuário primeiro
+- NUNCA emita nota sem CPF do tomador — é campo obrigatório pela legislação
+- Uma nota por serviço — não agrupe serviços diferentes numa nota só
+- Nota fiscal é apenas o documento fiscal — o lançamento financeiro já existe, NÃO registre de novo
+- NUNCA inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta
+- emitir_nota e registrar_lancamento NUNCA devem aparecer juntos na mesma resposta
+
+TIPOS DE NOTA FISCAL SUPORTADOS:
+- NFS-e (Nota Fiscal de Serviço Eletrônica): banhos, tosas, consultas veterinárias, hospedagem — via emissor nacional (BH migrou em jan/2026)
+- NF-e (Nota Fiscal Eletrônica de Produto): rações, medicamentos, acessórios — via SEFAZ estadual (implementação futura)
+Por enquanto o sistema emite apenas NFS-e.
+
+============================================================
+CONHECIMENTO FISCAL — DIAGNÓSTICO E RESOLUÇÃO DE ERROS
+============================================================
+
+Quando a emissão retornar erro, analise a mensagem e oriente o usuário conforme abaixo:
+
+ERROS DE CONFIGURAÇÃO (resolvidos pelo suporte da Oren):
+- "Configuração fiscal incompleta" → Os dados fiscais da empresa ainda não foram cadastrados. Contate o suporte.
+- "empresa_nao_habilitada" → A empresa precisa ser habilitada na plataforma Focus NFe. Contate o suporte.
+- "permissao_negada" (HTTP 403) → Token de acesso inválido ou bloqueado. Contate o suporte.
+
+ERROS DE DADOS DO CLIENTE (resolvidos pelo usuário no chat):
+- "CPF do cliente não encontrado" → Peça o CPF ao usuário e atualize o cadastro com atualizar_cliente
+- "CPF inválido" / código 237 → O CPF informado tem dígitos incorretos. Peça para conferir e informar novamente.
+- "CNPJ do destinatário inválido" / código 208 → O CNPJ informado está com erro. Peça para conferir.
+- "razao_social_tomador ausente" → Pergunte o nome completo do cliente para incluir na nota.
+
+ERROS DE DADOS FISCAIS (resolvidos com a contabilidade):
+- "inscricao_municipal_prestador inválida" → Inscrição municipal cadastrada incorretamente. Verificar com a contabilidade.
+- "codigo_tributacao_nacional_iss inválido" → Código de serviço ISS incorreto para o município. Verificar com o contador.
+- "aliquota_iss inválida" → Problema no formato da alíquota. Contate o suporte.
+- "Emissor não habilitado para emissão" / código 203 → A empresa precisa estar credenciada na prefeitura para emitir NFS-e.
+
+ERROS DE CERTIFICADO (resolvidos com a contabilidade):
+- "certificado inválido" / "Falha no reconhecimento da autoria" / código 202 → Certificado digital A1 expirado, incorreto ou não cadastrado. Providenciar novo certificado (.pfx) com a contabilidade.
+- "CNPJ do certificado difere do CNPJ emitente" / código 213 → O certificado digital não pertence ao CNPJ cadastrado. Verificar com a contabilidade.
+
+ERROS DE DUPLICIDADE:
+- "Duplicidade de NF-e" / código 204 → Tentativa de emitir nota com dados já enviados. Verifique se a nota já foi emitida. Se sim, não emita novamente.
+
+ERROS DO EMISSOR NACIONAL / PREFEITURA:
+- "Serviço paralisado momentaneamente" / código 108 → Instabilidade no sistema da prefeitura. Tente novamente em alguns minutos.
+- "município não aderiu ao emissor nacional" → O município do tomador ainda não está no padrão nacional. Verificar com o suporte.
+- Timeout / sem resposta → Instabilidade temporária na comunicação com a prefeitura. Tente novamente.
+
+REGRAS GERAIS DE DIAGNÓSTICO:
+- Erros HTTP 400 = problema nos dados enviados (CPF, CNPJ, código de serviço, alíquota)
+- Erros HTTP 403 = problema de autenticação (token, certificado, permissão)
+- Erros HTTP 404 = nota ou recurso não encontrado
+- Erros HTTP 422 = operação inválida para o status atual da nota
+- Erros HTTP 500 = problema interno (tente novamente; se persistir, contate o suporte)
+
+NOTA REJEITADA vs DENEGADA:
+- Rejeitada: pode ser corrigida e reenviada — identificar o campo com erro e corrigir
+- Denegada: problema fiscal grave com o CNPJ do emitente ou destinatário — contate a contabilidade
+
+COMO ORIENTAR O USUÁRIO EM CASO DE ERRO:
+1. Explique a causa em linguagem simples (sem jargão técnico)
+2. Diga o que precisa ser feito e quem deve fazer (usuário, contabilidade ou suporte Oren)
+3. Se for algo que o usuário pode resolver no chat (CPF errado, nome ausente), já peça a informação
+4. Se não for possível resolver no chat, diga: "Entre em contato com o suporte da Oren IA pelo e-mail contato@orenia.com.br informando o erro: [mensagem]"
+
+============================================================
 
 SALDO
 Não mostre saldo após cada lançamento. Mostre apenas quando solicitado.
@@ -284,9 +398,9 @@ NUNCA use tabelas markdown (com | e ---).
 
 REGISTRO ESTRUTURADO — OBRIGATÓRIO
 Ao final de CADA resposta que registra algo:
-DADOS_REGISTRO:{"acao":"[acao]","tipo":"[receita/despesa]","descricao":"[texto]","categoria":"[categoria]","forma_pagamento":"[forma]","bruto":[numero],"taxa":0,"liquido":0,"cliente":"[nome]","animal":"[nome ou vazio]","id_cliente":"[ID ou vazio]","data_lancamento":"[YYYY-MM-DD ou vazio]","sessoes_total":[numero],"valor_total":[numero],"servico":"[servico]","tipo_servico":"[servicos_salao ou servicos_veterinarios]","nome":"[nome funcionario]","cargo":"[cargo]","comissao":[numero],"titulo":"[titulo do evento]","data":"[YYYY-MM-DD ou vazio]","hora":"[HH:MM ou vazio]","descricao_evento":"[descricao ou vazio]"}
+DADOS_REGISTRO:{"acao":"[acao]","tipo":"[receita/despesa]","descricao":"[texto]","categoria":"[categoria]","forma_pagamento":"[forma]","bruto":[numero],"taxa":0,"liquido":0,"cliente":"[nome]","animal":"[nome ou vazio]","id_cliente":"[ID ou vazio]","data_lancamento":"[YYYY-MM-DD ou vazio]","sessoes_total":[numero],"valor_total":[numero],"servico":"[servico]","tipo_servico":"[servicos_salao ou servicos_veterinarios]","nome":"[nome funcionario]","cargo":"[cargo]","comissao":[numero],"titulo":"[titulo do evento]","data":"[YYYY-MM-DD ou vazio]","hora":"[HH:MM ou vazio]","descricao_evento":"[descricao ou vazio]","valor":[numero],"nome_tomador":"[nome]","cpf_tomador":"[cpf]","email_tomador":"[email ou vazio]"}
 
-Ações possíveis: registrar_lancamento, registrar_cliente, atualizar_cliente, registrar_pacote, usar_sessao, registrar_sessoes_retroativas, registrar_lembrete, inativar_lancamento, ativar_lancamento, adicionar_servico, registrar_funcionario, criar_evento, criar_evento_recorrente, cancelar_evento, registrar_historico_mensal, cadastrar_conta_pagar, pagar_conta, cadastrar_produto, entrada_estoque, saida_estoque
+Ações possíveis: registrar_lancamento, registrar_cliente, atualizar_cliente, registrar_pacote, usar_sessao, registrar_sessoes_retroativas, registrar_lembrete, inativar_lancamento, ativar_lancamento, adicionar_servico, registrar_funcionario, criar_evento, criar_evento_recorrente, cancelar_evento, registrar_historico_mensal, cadastrar_conta_pagar, pagar_conta, cadastrar_produto, entrada_estoque, saida_estoque, emitir_nota
 
 Regras do DADOS_REGISTRO:
 - "bruto" deve ser preenchido com o valor informado
@@ -295,6 +409,7 @@ Regras do DADOS_REGISTRO:
 - Para consultas não inclua o bloco DADOS_REGISTRO
 - O JSON deve ser válido, sem quebras de linha, numa única linha
 - NUNCA envie registrar_cliente com campo "nome" vazio
+- NUNCA inclua emitir_nota e registrar_lancamento na mesma resposta
 
 HISTÓRICO MENSAL — REGRA
 Quando o usuário informar dados de meses anteriores (ex: "em março tivemos 280 banhos e 4 consultas"), registre com a ação registrar_historico_mensal.
@@ -493,6 +608,9 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'Oren IA - Fin Backend' });
 });
 
+// ============================================================
+// CONTEXTO
+// ============================================================
 app.get('/contexto', async (req, res) => {
   const { session_id = 'default', slug } = req.query;
   try {
@@ -505,6 +623,9 @@ app.get('/contexto', async (req, res) => {
   }
 });
 
+// ============================================================
+// SALVAR
+// ============================================================
 app.post('/salvar', async (req, res) => {
   const { texto, session_id = 'default', mensagem_usuario = '', slug } = req.body;
   try {
@@ -517,6 +638,9 @@ app.post('/salvar', async (req, res) => {
   }
 });
 
+// ============================================================
+// CHAT — STREAMING
+// ============================================================
 app.post('/chat', async (req, res) => {
   const { mensagem, historico = [], contexto = {}, session_id = 'default', slug } = req.body;
   const ctx = contexto || {};
@@ -592,6 +716,9 @@ app.post('/chat', async (req, res) => {
   }
 });
 
+// ============================================================
+// PDF
+// ============================================================
 app.post('/pdf/:tipo', async (req, res) => {
   try {
     const { tipo } = req.params;
@@ -608,6 +735,156 @@ app.post('/pdf/:tipo', async (req, res) => {
   }
 });
 
+// ============================================================
+// NOTA FISCAL — emissão via Focus NFe
+// ============================================================
+app.post('/nota', async (req, res) => {
+  const {
+    slug,
+    descricao,
+    valor,
+    cnpj_prestador,
+    inscricao_municipal,
+    regime_tributario,
+    codigo_servico,
+    aliquota_iss,
+    cpf_tomador,
+    nome_tomador,
+    email_tomador
+  } = req.body;
+
+  const camposFaltando = [];
+  if (!descricao)          camposFaltando.push('descricao');
+  if (!valor)              camposFaltando.push('valor');
+  if (!cnpj_prestador)     camposFaltando.push('cnpj_prestador');
+  if (!inscricao_municipal) camposFaltando.push('inscricao_municipal');
+  if (!codigo_servico)     camposFaltando.push('codigo_servico');
+  if (!aliquota_iss)       camposFaltando.push('aliquota_iss');
+  if (!cpf_tomador)        camposFaltando.push('cpf_tomador');
+  if (!nome_tomador)       camposFaltando.push('nome_tomador');
+
+  if (camposFaltando.length > 0) {
+    return res.status(400).json({
+      sucesso: false,
+      erro: `Campos obrigatórios faltando: ${camposFaltando.join(', ')}`
+    });
+  }
+
+  if (!FOCUS_TOKEN) {
+    return res.status(500).json({
+      sucesso: false,
+      erro: 'FOCUS_NFE_TOKEN não configurado. Adicione a variável de ambiente no Railway.'
+    });
+  }
+
+  const agora = new Date();
+  const dataEmissao = agora.toISOString().replace('Z', '-03:00');
+  const dataCompetencia = agora.toISOString().split('T')[0];
+
+  const valorNumerico = parseFloat(valor);
+  const aliquotaDecimal = parseFloat(aliquota_iss) / 100;
+  const valorIss = parseFloat((valorNumerico * aliquotaDecimal).toFixed(2));
+  const cpfLimpo = cpf_tomador.replace(/\D/g, '');
+
+  const payload = {
+    data_emissao: dataEmissao,
+    data_competencia: dataCompetencia,
+    codigo_municipio_emissora: CODIGO_MUNICIPIO_BH,
+    cnpj_prestador: cnpj_prestador.replace(/\D/g, ''),
+    inscricao_municipal_prestador: inscricao_municipal,
+    codigo_opcao_simples_nacional: parseInt(regime_tributario) === 1 ? 1 : 0,
+    regime_especial_tributacao: 0,
+    cpf_tomador: cpfLimpo,
+    razao_social_tomador: nome_tomador.toUpperCase(),
+    codigo_municipio_tomador: CODIGO_MUNICIPIO_BH,
+    codigo_municipio_prestacao: CODIGO_MUNICIPIO_BH,
+    codigo_tributacao_nacional_iss: codigo_servico,
+    descricao_servico: descricao.toUpperCase(),
+    valor_servico: valorNumerico,
+    valor_iss: valorIss,
+    tributacao_iss: 1,
+    tipo_retencao_iss: 1,
+    percentual_total_tributos_federais: '6.00',
+    percentual_total_tributos_estaduais: '0.00',
+    percentual_total_tributos_municipais: String(aliquota_iss),
+    situacao_tributaria_pis_cofins: '07'
+  };
+
+  if (email_tomador) payload.email_tomador = email_tomador;
+
+  console.log(`[NOTA] Emitindo NFS-e | slug=${slug} | valor=${valor} | tomador=${nome_tomador} | ambiente=${FOCUS_AMBIENTE}`);
+
+  try {
+    const response = await axios.post(
+      `${FOCUS_BASE_URL}/v2/nfsen?ambiente=${FOCUS_AMBIENTE}`,
+      payload,
+      {
+        auth: { username: FOCUS_TOKEN, password: '' },
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    );
+
+    const dadosNota = response.data;
+    console.log(`[NOTA] Sucesso | ref=${dadosNota.ref || 'sem ref'} | status=${dadosNota.status}`);
+
+    return res.json({
+      sucesso: true,
+      ref: dadosNota.ref,
+      status: dadosNota.status,
+      numero: dadosNota.numero_nfse,
+      url_pdf: dadosNota.caminho_danfse || dadosNota.url || null,
+      dados_completos: dadosNota
+    });
+
+  } catch (err) {
+    const erroFocus = err.response?.data;
+    console.error('[NOTA] Erro Focus NFe:', JSON.stringify(erroFocus || err.message));
+    return res.status(500).json({
+      sucesso: false,
+      erro: erroFocus?.mensagem || erroFocus?.erros?.[0]?.mensagem || err.message,
+      detalhes: erroFocus || null
+    });
+  }
+});
+
+// ============================================================
+// NOTA FISCAL — consultar status por ref
+// ============================================================
+app.get('/nota/:ref', async (req, res) => {
+  const { ref } = req.params;
+
+  if (!FOCUS_TOKEN) {
+    return res.status(500).json({ sucesso: false, erro: 'FOCUS_NFE_TOKEN não configurado.' });
+  }
+
+  try {
+    const response = await axios.get(
+      `${FOCUS_BASE_URL}/v2/nfsen/${ref}?ambiente=${FOCUS_AMBIENTE}`,
+      {
+        auth: { username: FOCUS_TOKEN, password: '' },
+        timeout: 15000
+      }
+    );
+    const dados = response.data;
+    return res.json({
+      sucesso: true,
+      status: dados.status,
+      numero: dados.numero_nfse,
+      url_pdf: dados.caminho_danfse || dados.url || null,
+      dados_completos: dados
+    });
+  } catch (err) {
+    return res.status(500).json({
+      sucesso: false,
+      erro: err.response?.data?.mensagem || err.message
+    });
+  }
+});
+
+// ============================================================
+// START
+// ============================================================
 app.listen(PORT, () => {
   console.log(`Oren IA - Fin Backend rodando na porta ${PORT}`);
 });
