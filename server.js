@@ -204,7 +204,7 @@ REGISTRO ESTRUTURADO — OBRIGATÓRIO
 Ao final de CADA resposta que registra algo:
 DADOS_REGISTRO:{"acao":"[acao]","tipo":"[receita/despesa]","descricao":"[texto]","categoria":"[categoria]","forma_pagamento":"[forma]","bruto":[numero],"taxa":0,"liquido":0,"cliente":"[nome]","animal":"[nome ou vazio]","id_cliente":"[ID ou vazio]","data_lancamento":"[YYYY-MM-DD ou vazio]","sessoes_total":[numero],"valor_total":[numero],"servico":"[servico]","tipo_servico":"[servicos_salao ou servicos_veterinarios]","nome":"[nome funcionario]","cargo":"[cargo]","comissao":[numero],"titulo":"[titulo do evento]","data":"[YYYY-MM-DD ou vazio]","hora":"[HH:MM ou vazio]","descricao_evento":"[descricao ou vazio]"}
 
-Ações possíveis: registrar_lancamento, registrar_cliente, atualizar_cliente, registrar_pacote, usar_sessao, registrar_lembrete, inativar_lancamento, ativar_lancamento, adicionar_servico, registrar_funcionario, criar_evento, criar_evento_recorrente, cancelar_evento
+Ações possíveis: registrar_lancamento, registrar_cliente, atualizar_cliente, registrar_pacote, usar_sessao, registrar_lembrete, inativar_lancamento, ativar_lancamento, adicionar_servico, registrar_funcionario, criar_evento, criar_evento_recorrente, cancelar_evento, registrar_historico_mensal
 
 Regras do DADOS_REGISTRO:
 - "bruto" deve ser preenchido com o valor informado
@@ -212,6 +212,18 @@ Regras do DADOS_REGISTRO:
 - "data_lancamento" só precisa ser preenchido quando diferente de hoje
 - Para consultas não inclua o bloco DADOS_REGISTRO
 - O JSON deve ser válido, sem quebras de linha, numa única linha
+
+HISTÓRICO MENSAL — REGRA
+Quando o usuário informar dados de meses anteriores (ex: "em março tivemos 280 banhos e 4 consultas"), registre com a ação registrar_historico_mensal.
+Campos obrigatórios: mes (número), ano, banhos, consultas. Receita e despesas são opcionais.
+Exemplo:
+DADOS_REGISTRO:{"acao":"registrar_historico_mensal","mes":3,"ano":2026,"banhos":280,"consultas":4,"receita_total":18500,"despesas_total":5000}
+
+LANÇAMENTOS INATIVADOS — REGRA
+O contexto inclui o bloco LANÇAMENTOS DO DIA com todos os lançamentos incluindo os inativados, marcados com [INATIVO].
+Lançamentos [INATIVO] foram corrigidos — não os inclua em totais, resumos ou relatórios.
+Quando o usuário pedir resumo dos serviços do dia, ignore os [INATIVO].
+Quando o usuário perceber um erro no dashboard e pedir correção, use inativar_lancamento + registrar_lancamento normalmente.
 
 ============================================================
 GERAÇÃO DE PDF — REGRAS CRÍTICAS
