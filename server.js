@@ -7,9 +7,15 @@ const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-
 const MASTER_SPREADSHEET_ID = process.env.MASTER_SPREADSHEET_ID;
+const FOCUS_TOKEN = process.env.FOCUS_NFE_TOKEN;
+const FOCUS_AMBIENTE = process.env.FOCUS_NFE_AMBIENTE || 'homologacao';
+const FOCUS_BASE_URL = 'https://api.focusnfe.com.br';
+const CODIGO_MUNICIPIO_BH = 3106200;
 
+// ============================================================
+// GOOGLE AUTH + CACHE
+// ============================================================
 function getGoogleAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   return new google.auth.GoogleAuth({
@@ -42,52 +48,340 @@ async function getAppsScriptUrl(slug) {
   throw new Error(`Cliente não encontrado: ${slug}`);
 }
 
-app.use(cors({
-  origin: function(origin, callback) {
-    const allowed = [
-      process.env.FRONTEND_URL,
-      'http://localhost:5173',
-      'http://localhost:3000',
-      'https://oren-fin-frontend.vercel.app'
-    ].filter(Boolean);
-    if (!origin || allowed.includes(origin) || /\.orenia\.com\.br$/.test(origin)) {
-      callback(null, true);
-    } else {
-      callback(null, true);
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-client-slug']
-}));
-
-app.options('*', cors());
-app.use(express.json());
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const APPS_SCRIPT_URL_FALLBACK = process.env.APPS_SCRIPT_URL;
-
-// Focus NFe
-const FOCUS_TOKEN = process.env.FOCUS_NFE_TOKEN;
-const FOCUS_AMBIENTE = process.env.FOCUS_NFE_AMBIENTE || 'homologacao';
-const FOCUS_BASE_URL = 'https://api.focusnfe.com.br';
-const CODIGO_MUNICIPIO_BH = 3106200;
-
 async function resolveAppsScriptUrl(slug) {
-  if (!slug) return APPS_SCRIPT_URL_FALLBACK;
+  if (!slug) return process.env.APPS_SCRIPT_URL;
   try {
-    const url = await getAppsScriptUrl(slug);
-    console.log(`[resolveAppsScriptUrl] slug=${slug} → ${url}`);
-    return url;
+    return await getAppsScriptUrl(slug);
   } catch (err) {
-    console.error(`[resolveAppsScriptUrl] Erro para slug=${slug}:`, err.message);
-    if (slug === 'pethousebh4821') return APPS_SCRIPT_URL_FALLBACK;
+    console.error(`[resolveAppsScriptUrl] Erro slug=${slug}:`, err.message);
+    if (slug === 'pethousebh4821') return process.env.APPS_SCRIPT_URL;
     throw err;
   }
 }
 
 // ============================================================
-// SYSTEM PROMPT — PET SHOP v2
+// CORS + MIDDLEWARE
+// ============================================================
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || /\.orenia\.com\.br$/.test(origin)) return callback(null, true);
+    const allowed = [process.env.FRONTEND_URL, 'http://localhost:5173', 'http://localhost:3000', 'https://oren-fin-frontend.vercel.app'].filter(Boolean);
+    callback(null, allowed.includes(origin) || true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-client-slug']
+}));
+app.options('*', cors());
+app.use(express.json());
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ============================================================
+// TOOLS DEFINITION — petshop
+// Cada tool mapeia para uma ação no Apps Script
+// ============================================================
+const FIN_TOOLS = [
+  {
+    name: 'registrar_lancamento',
+    description: 'Registra uma receita ou despesa financeira. Use para qualquer serviço prestado, produto vendido ou despesa paga. O Apps Script calcula taxa e líquido automaticamente — sempre envie taxa e liquido como 0.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tipo: { type: 'string', enum: ['receita', 'despesa'], description: 'Tipo do lançamento' },
+        descricao: { type: 'string', description: 'Descrição do serviço ou despesa. Ex: "Banho - Rex", "Material de limpeza"' },
+        categoria: { type: 'string', description: 'Categoria. Ex: servicos_salao, servicos_veterinarios, produtos, despesas_fixas' },
+        forma_pagamento: { type: 'string', description: 'Forma de pagamento: dinheiro, pix, crédito, débito, transferência, pendente' },
+        bruto: { type: 'number', description: 'Valor bruto em reais' },
+        taxa: { type: 'number', description: 'Sempre 0 — o Apps Script calcula' },
+        liquido: { type: 'number', description: 'Sempre 0 — o Apps Script calcula' },
+        cliente: { type: 'string', description: 'Nome do tutor/cliente. Obrigatório para receitas.' },
+        animal: { type: 'string', description: 'Nome do pet/animal' },
+        id_cliente: { type: 'string', description: 'ID do cliente se já existir no cadastro' },
+        data_lancamento: { type: 'string', description: 'Data no formato YYYY-MM-DD. Vazio = hoje' }
+      },
+      required: ['tipo', 'descricao', 'forma_pagamento', 'bruto']
+    }
+  },
+  {
+    name: 'registrar_pacote',
+    description: 'Cria um pacote de serviços pré-pago. Sempre chame DEPOIS de registrar_lancamento para o pagamento do pacote.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente: { type: 'string', description: 'Nome do tutor' },
+        relacionado: { type: 'string', description: 'Nome do pet' },
+        servico: { type: 'string', description: 'Nome do serviço do pacote. Ex: "4 Banhos + 1 Hidratação"' },
+        sessoes_total: { type: 'number', description: 'Total de sessões do pacote' },
+        valor_total: { type: 'number', description: 'Valor total pago pelo pacote' },
+        id_cliente: { type: 'string', description: 'ID do cliente — obrigatório' },
+        data_lancamento: { type: 'string', description: 'Data da compra YYYY-MM-DD. Vazio = hoje' }
+      },
+      required: ['cliente', 'relacionado', 'servico', 'sessoes_total', 'valor_total', 'id_cliente']
+    }
+  },
+  {
+    name: 'usar_sessao',
+    description: 'Registra uso de uma sessão de pacote HOJE. Use apenas para sessões do dia atual.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente: { type: 'string', description: 'Nome do tutor' },
+        relacionado: { type: 'string', description: 'Nome do pet' },
+        servico: { type: 'string', description: 'Nome do serviço do pacote' },
+        data_lancamento: { type: 'string', description: 'Data YYYY-MM-DD. Vazio = hoje' }
+      },
+      required: ['cliente', 'relacionado', 'servico']
+    }
+  },
+  {
+    name: 'registrar_sessoes_retroativas',
+    description: 'Registra múltiplas sessões de pacote de datas passadas de uma vez. Use para sessões que já aconteceram antes de hoje.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente: { type: 'string', description: 'Nome do tutor' },
+        relacionado: { type: 'string', description: 'Nome do pet' },
+        servico: { type: 'string', description: 'Nome do serviço do pacote' },
+        datas: { type: 'array', items: { type: 'string' }, description: 'Array de datas no formato DD/MM/AAAA' }
+      },
+      required: ['cliente', 'relacionado', 'servico', 'datas']
+    }
+  },
+  {
+    name: 'registrar_cliente',
+    description: 'Cadastra um novo cliente explicitamente. Use APENAS quando o usuário pedir cadastro explícito sem lançamento. Para serviços, o cliente é cadastrado automaticamente via registrar_lancamento.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nome: { type: 'string', description: 'Nome do tutor — obrigatório' },
+        relacionado: { type: 'string', description: 'Nome do pet' },
+        telefone: { type: 'string', description: 'Telefone do cliente' },
+        cpf: { type: 'string', description: 'CPF do cliente' }
+      },
+      required: ['nome']
+    }
+  },
+  {
+    name: 'atualizar_cliente',
+    description: 'Atualiza dados de um cliente existente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_cliente: { type: 'string', description: 'ID do cliente' },
+        nome: { type: 'string' },
+        telefone: { type: 'string' },
+        relacionado: { type: 'string', description: 'Nome do pet' },
+        cpf: { type: 'string' }
+      },
+      required: ['id_cliente']
+    }
+  },
+  {
+    name: 'inativar_lancamento',
+    description: 'Inativa (cancela) um lançamento existente. Sempre use o id_lancamento.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_lancamento: { type: 'string', description: 'ID do lançamento — obrigatório' },
+        descricao: { type: 'string', description: 'Descrição para log' }
+      },
+      required: ['id_lancamento']
+    }
+  },
+  {
+    name: 'ativar_lancamento',
+    description: 'Ativa um lançamento pendente (fiado), registrando o recebimento do pagamento.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_lancamento: { type: 'string', description: 'ID do lançamento pendente' },
+        descricao: { type: 'string', description: 'Descrição do lançamento se não souber o ID' },
+        forma_pagamento: { type: 'string', description: 'Forma de pagamento efetivo recebido' }
+      },
+      required: ['forma_pagamento']
+    }
+  },
+  {
+    name: 'cadastrar_conta_pagar',
+    description: 'Cadastra uma conta fixa ou recorrente a pagar.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        descricao: { type: 'string', description: 'Nome da conta. Ex: Aluguel, Internet' },
+        valor: { type: 'number', description: 'Valor da conta' },
+        dia_vencimento: { type: 'number', description: 'Dia do mês que vence' },
+        recorrente: { type: 'boolean', description: 'true para contas mensais fixas' },
+        categoria: { type: 'string', description: 'Categoria da despesa' }
+      },
+      required: ['descricao', 'valor', 'dia_vencimento']
+    }
+  },
+  {
+    name: 'pagar_conta',
+    description: 'Registra o pagamento de uma conta cadastrada. O lançamento de despesa é criado automaticamente — não chame registrar_lancamento separado.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        descricao: { type: 'string', description: 'Nome da conta a pagar' },
+        id_conta: { type: 'string', description: 'ID da conta se souber' },
+        forma_pagamento: { type: 'string', description: 'Forma de pagamento' },
+        data_lancamento: { type: 'string', description: 'Data YYYY-MM-DD. Vazio = hoje' }
+      },
+      required: ['descricao', 'forma_pagamento']
+    }
+  },
+  {
+    name: 'cadastrar_produto',
+    description: 'Cadastra um produto no estoque.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nome: { type: 'string', description: 'Nome do produto' },
+        categoria: { type: 'string', description: 'Categoria. Ex: higiene, medicamento, acessório' },
+        quantidade: { type: 'number', description: 'Quantidade inicial em estoque' },
+        custo: { type: 'number', description: 'Preço de custo' },
+        preco_venda: { type: 'number', description: 'Preço de venda' },
+        unidade: { type: 'string', description: 'Unidade: un, kg, ml, cx' },
+        codigo_barras: { type: 'string', description: 'Código de barras opcional' }
+      },
+      required: ['nome', 'quantidade', 'custo', 'preco_venda']
+    }
+  },
+  {
+    name: 'entrada_estoque',
+    description: 'Registra entrada de produtos no estoque.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nome: { type: 'string', description: 'Nome do produto' },
+        quantidade: { type: 'number', description: 'Quantidade a adicionar' },
+        custo: { type: 'number', description: 'Novo custo unitário (opcional)' }
+      },
+      required: ['nome', 'quantidade']
+    }
+  },
+  {
+    name: 'saida_estoque',
+    description: 'Registra venda de produto. O lançamento de receita é criado automaticamente — não chame registrar_lancamento separado.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nome: { type: 'string', description: 'Nome do produto' },
+        quantidade: { type: 'number', description: 'Quantidade vendida' },
+        preco_venda: { type: 'number', description: 'Preço unitário de venda' },
+        registrar_venda: { type: 'boolean', description: 'Sempre true' },
+        forma_pagamento: { type: 'string', description: 'Forma de pagamento' },
+        cliente: { type: 'string', description: 'Nome do cliente' },
+        id_cliente: { type: 'string', description: 'ID do cliente' },
+        data_lancamento: { type: 'string', description: 'Data YYYY-MM-DD. Vazio = hoje' }
+      },
+      required: ['nome', 'quantidade', 'preco_venda', 'forma_pagamento']
+    }
+  },
+  {
+    name: 'emitir_nota',
+    description: 'Emite nota fiscal NFS-e para um serviço prestado.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        descricao: { type: 'string', description: 'Descrição do serviço' },
+        valor: { type: 'number', description: 'Valor do serviço' },
+        nome_tomador: { type: 'string', description: 'Nome completo do cliente' },
+        cpf_tomador: { type: 'string', description: 'CPF do cliente' },
+        id_cliente: { type: 'string', description: 'ID do cliente' },
+        email_tomador: { type: 'string', description: 'Email do cliente (opcional)' }
+      },
+      required: ['descricao', 'valor', 'nome_tomador', 'cpf_tomador']
+    }
+  },
+  {
+    name: 'registrar_funcionario',
+    description: 'Cadastra um funcionário.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nome: { type: 'string' },
+        cargo: { type: 'string' },
+        comissao: { type: 'number', description: 'Percentual de comissão' }
+      },
+      required: ['nome', 'cargo']
+    }
+  },
+  {
+    name: 'criar_evento',
+    description: 'Cria um evento na agenda.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        titulo: { type: 'string' },
+        data: { type: 'string', description: 'YYYY-MM-DD' },
+        hora: { type: 'string', description: 'HH:MM' },
+        descricao_evento: { type: 'string' }
+      },
+      required: ['titulo', 'data']
+    }
+  },
+  {
+    name: 'criar_evento_recorrente',
+    description: 'Cria um evento semanal recorrente na agenda.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        titulo: { type: 'string' },
+        dia_semana: { type: 'string', description: 'segunda/terca/quarta/quinta/sexta/sabado/domingo' },
+        hora: { type: 'string', description: 'HH:MM' },
+        descricao_evento: { type: 'string' }
+      },
+      required: ['titulo', 'dia_semana']
+    }
+  },
+  {
+    name: 'cancelar_evento',
+    description: 'Cancela evento(s) na agenda.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        titulo: { type: 'string' },
+        data: { type: 'string', description: 'YYYY-MM-DD. Vazio = cancela todos com esse título' }
+      },
+      required: ['titulo']
+    }
+  },
+  {
+    name: 'registrar_lembrete',
+    description: 'Registra um lembrete para um cliente.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        cliente: { type: 'string' },
+        relacionado: { type: 'string', description: 'Nome do pet' },
+        descricao: { type: 'string' },
+        data_lembrete: { type: 'string', description: 'DD/MM/YYYY' }
+      },
+      required: ['descricao']
+    }
+  },
+  {
+    name: 'registrar_historico_mensal',
+    description: 'Salva dados históricos de um mês passado.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        mes: { type: 'number' },
+        ano: { type: 'number' },
+        banhos: { type: 'number' },
+        consultas: { type: 'number' },
+        receita_total: { type: 'number' },
+        despesas_total: { type: 'number' }
+      },
+      required: ['mes', 'ano']
+    }
+  }
+];
+
+// ============================================================
+// SYSTEM PROMPT — PET SHOP v3 (sem DADOS_REGISTRO)
 // ============================================================
 const SYSTEM_PROMPT_PETSHOP = `Você é o Fin, assistente financeiro inteligente da Oren IA, criado para donos de pet shops controlarem finanças em linguagem natural — sem planilha, sem sistema complexo.
 
@@ -134,51 +428,43 @@ REGRA CENTRAL — CLIENTES E TUTORES
 ============================================================
 O sistema identifica clientes pelo par TUTOR + PET. Siga sempre esta ordem:
 
-PASSO 1 — Nome do tutor é obrigatório
-Se a mensagem não trouxer o nome do tutor, pergunte ANTES de qualquer registro:
+PASSO 1 — Nome do tutor é obrigatório para receitas
+Se a mensagem não trouxer o nome do tutor, pergunte ANTES de chamar qualquer tool:
 "Qual o nome do tutor de [animal]?"
-NUNCA envie DADOS_REGISTRO com o campo "cliente" vazio.
+NUNCA chame registrar_lancamento com o campo "cliente" vazio para receitas.
 
 PASSO 2 — Verificar na lista CLIENTES CADASTRADOS
-- Tutor não existe na lista → novo cliente, cadastra normalmente
+- Tutor não existe → novo cliente, registra normalmente
 - Tutor existe com o mesmo pet → mesmo cliente, use o id_cliente existente
-- Tutor existe mas com pet diferente → mesmo tutor, pet novo. Use o id_cliente existente do tutor.
-- Mais de um tutor com o mesmo nome → pergunte qual é o correto ANTES de registrar:
+- Tutor existe mas com pet diferente → mesmo tutor, pet novo. Use o id_cliente existente.
+- Mais de um tutor com o mesmo nome → pergunte qual é o correto ANTES de chamar a tool:
   "Encontrei mais de um(a) [Nome] cadastrado(a). É o(a) tutor(a) de [animal existente] ou é um(a) novo(a)?"
 
 PASSO 3 — Sempre inclua id_cliente quando o tutor já existir
-NUNCA deixe id_cliente vazio se o tutor já está na lista. Isso evita duplicatas.
+NUNCA deixe id_cliente vazio se o tutor já está na lista.
 
-NUNCA assuma que dois tutores com o mesmo nome são a mesma pessoa sem confirmar.
+PASSO 4 — APÓS RESOLVER AMBIGUIDADE, chame a tool imediatamente
+Quando o usuário confirmar qual tutor é, chame registrar_lancamento na mesma resposta.
+NUNCA confirme sem chamar a tool.
 
-PASSO 4 — REGRA CRÍTICA DE GERAÇÃO DE DADOS_REGISTRO
-
-Para registro de SERVIÇO ou VENDA: gere APENAS registrar_lancamento, NUNCA registrar_cliente separado.
-O sistema cadastra o cliente automaticamente a partir do lançamento. Gerar registrar_cliente separado causa bug.
-
-Para cadastro EXPLÍCITO sem lançamento (ex: "cadastra a Maria com o Rex"): aí sim use registrar_cliente.
-
-APÓS RESOLVER AMBIGUIDADE: gere sempre o registrar_lancamento na mesma resposta da confirmação.
-NUNCA confirme uma ambiguidade sem gerar o DADOS_REGISTRO logo em seguida.
-
-Exemplo correto — serviço com tutor novo ou ambíguo:
-✅ Registrado! Banho - Meg | R$ 80,00 | Dinheiro | Juliana / Max
-DADOS_REGISTRO:{"acao":"registrar_lancamento","tipo":"receita","descricao":"Banho - Meg","categoria":"servicos_salao","forma_pagamento":"dinheiro","bruto":80,"taxa":0,"liquido":0,"cliente":"Juliana","animal":"Meg","id_cliente":"[ID da Juliana se souber, senão vazio]","data_lancamento":""}
+PASSO 5 — Para serviços, chame APENAS registrar_lancamento
+O sistema cadastra o cliente automaticamente. Não chame registrar_cliente separado para serviços.
+Use registrar_cliente apenas para cadastro explícito sem lançamento (ex: "cadastra a Maria com o Rex").
 
 ============================================================
 REGISTRAR RECEITA E DESPESA
 ============================================================
 Interprete a mensagem, identifique serviço/produto, valor, forma de pagamento, tutor e animal.
-Confirme o registro sem mostrar saldo.
+Confirme o registro em texto. Chame a tool correspondente.
 
-TAXAS DE CARTÃO — nunca calcule você mesmo. O campo "taxa" e "liquido" no DADOS_REGISTRO devem ser sempre 0. O Apps Script calcula automaticamente com base na forma de pagamento.
+TAXAS DE CARTÃO — nunca calcule. Envie taxa=0 e liquido=0. O sistema calcula automaticamente.
 
-FORMA DE PAGAMENTO — valores aceitos: dinheiro, pix, crédito, débito, transferência, pendente, fiado.
+FORMA DE PAGAMENTO — valores aceitos: dinheiro, pix, crédito, débito, transferência, pendente.
 Use "pendente" quando o cliente não pagou na hora (fiado).
 
 PAGAMENTOS PENDENTES (FIADO):
-- Registra com forma_pagamento "pendente" — o valor NÃO entra no saldo
-- Para receber o pagamento: use ativar_lancamento com id_lancamento e forma_pagamento do pagamento efetivo
+- Chame registrar_lancamento com forma_pagamento "pendente"
+- Para receber: chame ativar_lancamento com id_lancamento e forma_pagamento do pagamento
 - Pendentes aparecem nos ÚLTIMOS LANÇAMENTOS com tag [PENDENTE]
 
 SALDO — mostre apenas quando solicitado explicitamente.
@@ -186,84 +472,51 @@ SALDO — mostre apenas quando solicitado explicitamente.
 ============================================================
 PACOTES PRÉ-PAGOS
 ============================================================
-FLUXO OBRIGATÓRIO ao registrar pacote — sempre nesta ordem:
+FLUXO OBRIGATÓRIO — chame as tools nesta ordem:
 1. registrar_lancamento — entrada financeira do pagamento
-2. registrar_pacote — cria o controle de sessões (SEMPRE com id_cliente preenchido)
-3. registrar_sessoes_retroativas — SE houver sessões já realizadas em datas passadas (todas de uma vez em array de strings "DD/MM/AAAA")
+2. registrar_pacote — cria o controle de sessões (SEMPRE com id_cliente)
+3. registrar_sessoes_retroativas — SE houver sessões de datas passadas (todas de uma vez)
 4. usar_sessao — SOMENTE se houver sessão sendo realizada HOJE
 
 REGRAS DE SESSÃO:
-- usar_sessao é EXCLUSIVO para a sessão do dia atual
-- Para datas passadas use SEMPRE registrar_sessoes_retroativas, nunca usar_sessao
+- usar_sessao é EXCLUSIVO para o dia atual
+- Para datas passadas use SEMPRE registrar_sessoes_retroativas
 - Quando restar 1 sessão: avise "Atenção: última sessão do pacote!"
 - Quando zerar: avise "Pacote encerrado. Deseja renovar?"
-- NUNCA registre uso de sessão apenas no texto — sempre mande o DADOS_REGISTRO correto
 
-Exemplo — pacote com 2 sessões passadas e 1 hoje:
-DADOS_REGISTRO:{"acao":"registrar_lancamento","tipo":"receita","descricao":"Pacote 4 Banhos + 1 Hidratação - Toby","categoria":"servicos_salao","forma_pagamento":"pix","bruto":220,"taxa":0,"liquido":0,"cliente":"Dora","animal":"Toby","id_cliente":"123","data_lancamento":"2026-06-01"}
-DADOS_REGISTRO:{"acao":"registrar_pacote","cliente":"Dora","relacionado":"Toby","servico":"4 Banhos + 1 Hidratação","sessoes_total":5,"valor_total":220,"id_cliente":"123","data_lancamento":"2026-06-01"}
-DADOS_REGISTRO:{"acao":"registrar_sessoes_retroativas","cliente":"Dora","relacionado":"Toby","servico":"4 Banhos + 1 Hidratação","datas":["18/05/2026","25/05/2026"]}
-DADOS_REGISTRO:{"acao":"usar_sessao","cliente":"Dora","relacionado":"Toby","servico":"4 Banhos + 1 Hidratação","data_lancamento":"2026-06-01"}
-
-Exemplo — pacote sem nenhuma sessão ainda:
-DADOS_REGISTRO:{"acao":"registrar_lancamento",...}
-DADOS_REGISTRO:{"acao":"registrar_pacote",...}
-
-Sessão avulsa hoje (sem compra nova):
-DADOS_REGISTRO:{"acao":"usar_sessao","cliente":"Carlos","relacionado":"Jade","servico":"Banho + Hidratação"}
+Sessão avulsa hoje (sem compra nova): chame apenas usar_sessao.
 
 ============================================================
 CORRIGIR LANÇAMENTO
 ============================================================
-Nunca apaga — apenas marca como INATIVO e cria novo.
-1. Busca o lançamento nos ÚLTIMOS LANÇAMENTOS pelo ID [ID:xxxxxxxxx]
-2. Manda DOIS blocos: primeiro inativar_lancamento com id_lancamento, depois registrar_lancamento correto
-3. Sempre inclua id_lancamento ao inativar. Nunca inativa sem ID.
-4. Confirme mostrando valor antigo e novo.
-Lançamentos [INATIVO] nos resumos e relatórios devem ser ignorados.
+Nunca apaga — inativa e cria novo.
+1. Busca o ID nos ÚLTIMOS LANÇAMENTOS ([ID:xxxxxxxxx])
+2. Chame inativar_lancamento com id_lancamento
+3. Chame registrar_lancamento com os dados corretos
+4. Confirme mostrando valor antigo e novo
 
 ============================================================
 CONTAS A PAGAR
 ============================================================
-Conta recorrente (ex: "aluguel todo dia 5, R$ 3.200"):
-- Use cadastrar_conta_pagar com recorrente: true
-- Confirme: descrição, valor, dia de vencimento, categoria
-
-Pagamento de conta (ex: "paguei o aluguel"):
-- Identifique a conta no contexto pela descrição
-- Use pagar_conta — o lançamento de despesa é registrado automaticamente
-- NÃO registre um lançamento de despesa separado — o pagar_conta já faz isso
+Conta recorrente: chame cadastrar_conta_pagar com recorrente: true
+Pagamento: chame pagar_conta — o lançamento é criado automaticamente. NÃO chame registrar_lancamento separado.
 
 ============================================================
 PRODUTOS E ESTOQUE
 ============================================================
-Cadastrar produto novo:
-- Pergunte: nome, categoria, quantidade inicial, custo, preço de venda, unidade (un/kg/ml/cx)
-- Código de barras é opcional
-- Use cadastrar_produto
+Cadastrar: chame cadastrar_produto
+Venda: chame saida_estoque com registrar_venda: true — o lançamento é criado automaticamente. NÃO chame registrar_lancamento separado.
+Entrada: chame entrada_estoque
 
-Venda de produto:
-- Use saida_estoque com registrar_venda: true e os campos: nome, quantidade, preco_venda, forma_pagamento, cliente, id_cliente
-- O lançamento de receita é registrado automaticamente pelo sistema
-- NÃO registre um registrar_lancamento separado — o saida_estoque já faz isso
-- SEMPRE confirme com o cliente ANTES de registrar, igual ao fluxo de qualquer receita
-
-Entrada de estoque:
-- Use entrada_estoque com nome, quantidade e custo (opcional)
+Antes de cadastrar produto novo, pergunte: categoria, quantidade, custo, preço de venda, unidade (un/ml/kg/cx), código de barras (opcional).
 
 ============================================================
 RELATÓRIOS
 ============================================================
-Quando solicitado, pergunte primeiro: "Prefere receber aqui no chat ou em PDF para download?"
-Se chat → gera em texto formatado com dados do contexto.
-Se PDF → responde com GERAR_PDF e os dados estruturados.
+Quando solicitado, pergunte: "Prefere receber aqui no chat ou em PDF para download?"
+Se PDF → responda "📊 Gerando seu PDF, um momento..." e inclua o bloco GERAR_PDF.
 
-NUNCA inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta.
-Se o cliente pedir PDF explicitamente, gere direto sem perguntar.
-
-RESUMO DE SERVIÇOS DO DIA — mostre DOIS blocos separados:
-Serviços pagos: valor bruto e forma de pagamento
-Sessões de pacote: sem valor, só serviço e animal
+NUNCA inclua GERAR_PDF numa resposta que também chama tools de registro.
 
 CONHECIMENTOS CONTÁBEIS:
 RECEITA BRUTA: soma de todos os valores brutos de receita
@@ -274,145 +527,41 @@ DESPESAS OPERACIONAIS: demais despesas
 LUCRO LÍQUIDO: lucro bruto menos despesas operacionais
 TICKET MÉDIO: receita bruta ÷ número de atendimentos
 
-NÚMEROS E CÁLCULOS — todos os totais vêm calculados no contexto. Nunca some por conta própria.
-
-============================================================
-FUNCIONÁRIOS
-============================================================
-Cadastra nome, cargo e percentual de comissão.
-Calcula comissão por período quando solicitado.
-
-============================================================
-AGENDA E LEMBRETES
-============================================================
-Data sempre YYYY-MM-DD e hora HH:MM.
-Recorrência semanal: usar_evento_recorrente — o sistema cria 52 eventos automaticamente.
-
 ============================================================
 NOTA FISCAL — NFS-e
 ============================================================
-QUANDO EMITIR: reconheça pedidos diretos ("emite nota para Vanessa") ou indiretos ("preciso do documento fiscal").
+QUANDO EMITIR: pedidos diretos ("emite nota") ou indiretos ("preciso do documento fiscal").
 
-FLUXO OBRIGATÓRIO:
-1. Identificar serviço e valor — se não estiver claro, pergunte
+FLUXO:
+1. Identificar serviço e valor
 2. Verificar CPF em CLIENTES CADASTRADOS
-   - Sem CPF → pergunte, depois atualize com atualizar_cliente ANTES de emitir
-3. Confirmar dados SEMPRE antes de emitir:
+   - Sem CPF → peça, depois chame atualizar_cliente ANTES de emitir
+3. Confirmar dados:
    "📄 Vou emitir a nota fiscal:
-   Serviço: [descrição] | Valor: R$ [valor] | Tomador: [nome] — CPF: [cpf]
+   Serviço: [desc] | Valor: R$ [valor] | Tomador: [nome] — CPF: [cpf]
    Confirma?"
 4. Após confirmação: "📄 Emitindo nota fiscal, um momento..."
-   DADOS_REGISTRO:{"acao":"emitir_nota","descricao":"[desc]","valor":[numero],"nome_tomador":"[nome]","cpf_tomador":"[cpf]","id_cliente":"[id]","email_tomador":""}
-5. Retorno:
-   - Sucesso: "✅ Nota emitida! Número [número]. PDF: [link se houver]."
-   - Erro: oriente conforme tabela abaixo
+   Chame a tool emitir_nota
 
 REGRAS:
 - NUNCA emita sem confirmar dados com o usuário
-- NUNCA emita sem CPF — é obrigatório por lei
-- Nota fiscal é apenas o documento — NÃO registre lançamento separado
-- emitir_nota e registrar_lancamento NUNCA juntos na mesma resposta
-- Atualmente só NFS-e (serviços). NF-e (produtos) é implementação futura.
-
-DIAGNÓSTICO DE ERROS:
-Configuração (suporte Oren): "Configuração fiscal incompleta", "empresa_nao_habilitada", "permissao_negada" (403)
-Dados do cliente (resolver no chat): "CPF inválido" → peça novo CPF | "razao_social_tomador ausente" → peça nome completo
-Dados fiscais (contabilidade): "inscricao_municipal inválida", "codigo_tributacao inválido", "aliquota_iss inválida"
-Certificado (contabilidade): "certificado inválido", "Falha no reconhecimento da autoria" (código 202), "CNPJ do certificado difere" (código 213)
-Duplicidade: "Duplicidade de NF-e" (código 204) → nota já emitida, não reenvie
-Prefeitura instável: "Serviço paralisado" (código 108) → tente novamente em minutos
-HTTP 400 = dados incorretos | HTTP 403 = autenticação | HTTP 404 = não encontrado | HTTP 500 = tente novamente
-
-Nota rejeitada: pode ser corrigida e reenviada.
-Nota denegada: problema fiscal grave — contate a contabilidade.
-
-============================================================
-HISTÓRICO MENSAL
-============================================================
-Quando o usuário informar dados de meses anteriores (ex: "em março tivemos 280 banhos"):
-DADOS_REGISTRO:{"acao":"registrar_historico_mensal","mes":3,"ano":2026,"banhos":280,"consultas":4,"receita_total":18500,"despesas_total":5000}
-
-============================================================
-REGISTRO ESTRUTURADO — OBRIGATÓRIO
-============================================================
-Ao final de CADA resposta que registra algo, inclua o(s) bloco(s) DADOS_REGISTRO necessários.
-O JSON deve ser válido, sem quebras de linha, em uma única linha por bloco.
-Para consultas não inclua DADOS_REGISTRO.
-
-CAMPOS OBRIGATÓRIOS POR AÇÃO:
-
-registrar_lancamento:
-{"acao":"registrar_lancamento","tipo":"receita ou despesa","descricao":"[texto]","categoria":"[categoria]","forma_pagamento":"[forma]","bruto":[numero],"taxa":0,"liquido":0,"cliente":"[nome ou vazio se despesa]","animal":"[nome ou vazio]","id_cliente":"[ID ou vazio]","data_lancamento":"[YYYY-MM-DD ou vazio se hoje]"}
-
-registrar_cliente:
-{"acao":"registrar_cliente","nome":"[nome tutor — NUNCA vazio]","relacionado":"[nome pet]","telefone":"[ou vazio]","cpf":"[ou vazio]"}
-
-atualizar_cliente:
-{"acao":"atualizar_cliente","id_cliente":"[ID]","nome":"[opcional]","telefone":"[opcional]","relacionado":"[opcional]","cpf":"[opcional]"}
-
-registrar_pacote:
-{"acao":"registrar_pacote","cliente":"[nome]","relacionado":"[pet]","servico":"[nome do serviço]","sessoes_total":[numero],"valor_total":[numero],"id_cliente":"[ID — obrigatório]","data_lancamento":"[YYYY-MM-DD ou vazio]"}
-
-usar_sessao:
-{"acao":"usar_sessao","cliente":"[nome]","relacionado":"[pet]","servico":"[nome do serviço]","data_lancamento":"[YYYY-MM-DD ou vazio se hoje]"}
-
-registrar_sessoes_retroativas:
-{"acao":"registrar_sessoes_retroativas","cliente":"[nome]","relacionado":"[pet]","servico":"[nome do serviço]","datas":["DD/MM/AAAA","DD/MM/AAAA"]}
-
-inativar_lancamento:
-{"acao":"inativar_lancamento","id_lancamento":"[ID obrigatório]","descricao":"[opcional]"}
-
-ativar_lancamento:
-{"acao":"ativar_lancamento","id_lancamento":"[ID se souber]","descricao":"[ou descrição]","forma_pagamento":"[forma do pagamento efetivo]"}
-
-cadastrar_conta_pagar:
-{"acao":"cadastrar_conta_pagar","descricao":"[nome da conta]","valor":[numero],"dia_vencimento":[numero],"recorrente":true,"categoria":"[categoria]"}
-
-pagar_conta:
-{"acao":"pagar_conta","descricao":"[nome da conta]","forma_pagamento":"[forma]","data_lancamento":"[YYYY-MM-DD ou vazio]"}
-
-cadastrar_produto:
-{"acao":"cadastrar_produto","nome":"[nome]","categoria":"[categoria]","quantidade":[numero],"custo":[numero],"preco_venda":[numero],"unidade":"[un/kg/ml/cx]","codigo_barras":"[ou vazio]"}
-
-entrada_estoque:
-{"acao":"entrada_estoque","nome":"[nome do produto]","quantidade":[numero],"custo":[numero ou 0]}
-
-saida_estoque:
-{"acao":"saida_estoque","nome":"[nome do produto]","quantidade":[numero],"preco_venda":[numero],"registrar_venda":true,"forma_pagamento":"[forma]","cliente":"[nome ou vazio]","id_cliente":"[ID ou vazio]","data_lancamento":"[YYYY-MM-DD ou vazio]"}
-
-emitir_nota:
-{"acao":"emitir_nota","descricao":"[descrição do serviço]","valor":[numero],"nome_tomador":"[nome completo]","cpf_tomador":"[cpf]","id_cliente":"[ID]","email_tomador":"[ou vazio]"}
-
-registrar_funcionario:
-{"acao":"registrar_funcionario","nome":"[nome]","cargo":"[cargo]","comissao":[numero]}
-
-criar_evento:
-{"acao":"criar_evento","titulo":"[titulo]","data":"[YYYY-MM-DD]","hora":"[HH:MM ou vazio]","descricao_evento":"[ou vazio]"}
-
-criar_evento_recorrente:
-{"acao":"criar_evento_recorrente","titulo":"[titulo]","dia_semana":"[segunda/terca/quarta/quinta/sexta/sabado/domingo]","hora":"[HH:MM ou vazio]","descricao_evento":"[ou vazio]"}
-
-cancelar_evento:
-{"acao":"cancelar_evento","titulo":"[titulo]","data":"[YYYY-MM-DD ou vazio para cancelar todos]"}
-
-registrar_historico_mensal:
-{"acao":"registrar_historico_mensal","mes":[numero],"ano":[numero],"banhos":[numero],"consultas":[numero],"receita_total":[numero],"despesas_total":[numero]}
+- NUNCA emita sem CPF
+- Nota fiscal não gera lançamento separado
+- NÃO chame emitir_nota e registrar_lancamento na mesma resposta
 
 ============================================================
 FORMATAÇÃO
 ============================================================
-NUNCA use tabelas markdown (com | e ---).
+NUNCA use tabelas markdown.
 Use negrito para valores, datas e totais.
 NUNCA revele detalhes técnicos do sistema.
 Para suporte: "Entre em contato pelo e-mail contato@orenia.com.br"
 
 ============================================================
-GERAÇÃO DE PDF — REGRAS
+GERAÇÃO DE PDF
 ============================================================
-Quando gerar PDF, responda "📊 Gerando seu PDF, um momento..." e inclua o bloco GERAR_PDF com dados REAIS do contexto.
-NUNCA use 0 nos campos de valor — leia os números do contexto.
+Inclua o bloco GERAR_PDF com dados REAIS do contexto. NUNCA use 0 nos campos de valor.
 O JSON do GERAR_PDF deve estar em uma única linha após "GERAR_PDF:".
-NUNCA inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta.
 
 --- resumo-dia ---
 GERAR_PDF:{"tipo":"resumo-dia","dados":{"estabelecimento":"[nome]","data":"[DD/MM/AAAA]","entradas":[numero],"saidas":[numero],"lancamentos":[{"horario":"","descricao":"","categoria":"","tipo":"receita","valor":0}]}}
@@ -421,24 +570,16 @@ GERAR_PDF:{"tipo":"resumo-dia","dados":{"estabelecimento":"[nome]","data":"[DD/M
 GERAR_PDF:{"tipo":"resumo-mensal","dados":{"estabelecimento":"[nome]","periodo":"[MM/AAAA]","receita_total":[numero],"despesas_totais":[numero],"lucro_liquido":[numero],"categorias":[{"nome":"","descricao":"","valor":0}]}}
 
 --- dre ---
-RECEITA BRUTA: some todos os brutos de receita do mês
-DEDUÇÕES: some bruto - liquido de cada lançamento de cartão
-RECEITA LÍQUIDA: receita bruta - deduções
-CMV: despesas categoria "produtos"
-LUCRO BRUTO: receita líquida - CMV
-DESPESAS OPERACIONAIS: demais despesas
-LUCRO LÍQUIDO: lucro bruto - despesas operacionais
 GERAR_PDF:{"tipo":"dre","dados":{"estabelecimento":"[nome]","periodo":"[MM/AAAA]","itens":{"receita_bruta":[{"nome":"","valor":0}],"total_receita_bruta":0,"deducoes":[{"nome":"","valor":0}],"total_deducoes":0,"receita_liquida":0,"cmv":[{"nome":"","valor":0}],"total_cmv":0,"lucro_bruto":0,"despesas_op":[{"nome":"","valor":0}],"total_despesas_op":0,"lucro_liquido":0}}}
 
 --- contabil-detalhado ---
-Taxa crédito = bruto × {taxa_credito} / 100 | Taxa débito = bruto × {taxa_debito} / 100 | Líquido = bruto - taxa
 GERAR_PDF:{"tipo":"contabil-detalhado","dados":{"estabelecimento":"[nome]","periodo":"[MM/AAAA]","resumo":{"receita_total":0,"despesas_totais":0,"lucro_liquido":0,"margem":"0%"},"receitas":[{"data":"","descricao":"","categoria":"","forma_pagamento":"","bruto":0,"taxa":0,"liquido":0}],"despesas":[{"data":"","descricao":"","categoria":"","forma_pagamento":"","bruto":0,"taxa":0,"liquido":0}]}}
 
 --- ranking-servicos ---
 GERAR_PDF:{"tipo":"ranking-servicos","dados":{"estabelecimento":"[nome]","periodo":"[MM/AAAA]","servicos":[{"nome":"","receita":0,"quantidade":0}]}}`;
 
 // ============================================================
-// SYSTEM PROMPT — IMOBILIÁRIA
+// SYSTEM PROMPT — IMOBILIÁRIA (mantém DADOS_REGISTRO)
 // ============================================================
 const SYSTEM_PROMPT_IMOBILIARIA = `Você é o Fin, assistente financeiro inteligente da Oren IA. Criado para ajudar imobiliárias e corretores a controlar suas finanças, administrar aluguéis e calcular repasses de forma simples, conversando em linguagem natural.
 
@@ -554,10 +695,31 @@ function getSystemPrompt(ctx) {
 }
 
 // ============================================================
+// EXECUTAR TOOL NO APPS SCRIPT
+// ============================================================
+async function executarTool(toolName, toolInput, appsScriptUrl, sessionId) {
+  const payload = { acao: toolName, ...toolInput };
+  console.log(`[TOOL] ${toolName} | ${JSON.stringify(payload).slice(0, 200)}`);
+  try {
+    // Converte tool_use num DADOS_REGISTRO para o Apps Script processar
+    const textoRegistro = `\nDADOS_REGISTRO:${JSON.stringify(payload)}`;
+    await axios.post(appsScriptUrl, {
+      texto: textoRegistro,
+      session_id: sessionId,
+      mensagem_usuario: ''
+    }, { timeout: 15000, maxRedirects: 5 });
+    return { sucesso: true };
+  } catch (err) {
+    console.error(`[TOOL ERROR] ${toolName}:`, err.message);
+    return { sucesso: false, erro: err.message };
+  }
+}
+
+// ============================================================
 // HEALTH CHECK
 // ============================================================
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Oren IA - Fin Backend' });
+  res.json({ status: 'ok', service: 'Oren IA - Fin Backend v3 (tool use)' });
 });
 
 // ============================================================
@@ -576,7 +738,7 @@ app.get('/contexto', async (req, res) => {
 });
 
 // ============================================================
-// SALVAR
+// SALVAR (mantido para compatibilidade)
 // ============================================================
 app.post('/salvar', async (req, res) => {
   const { texto, session_id = 'default', mensagem_usuario = '', slug } = req.body;
@@ -591,11 +753,12 @@ app.post('/salvar', async (req, res) => {
 });
 
 // ============================================================
-// CHAT — STREAMING
+// CHAT — STREAMING COM TOOL USE (petshop) / DADOS_REGISTRO (imobiliária)
 // ============================================================
 app.post('/chat', async (req, res) => {
   const { mensagem, historico = [], contexto = {}, session_id = 'default', slug } = req.body;
   const ctx = contexto || {};
+  const segmento = ctx.segmento || 'pet_shop';
   const systemPromptFinal = getSystemPrompt(ctx);
   const messages = [...historico, { role: 'user', content: mensagem }];
 
@@ -604,65 +767,145 @@ app.post('/chat', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
 
-  let respostaCompleta = '';
-
   try {
     const appsScriptUrl = await resolveAppsScriptUrl(slug);
+
+    // Imobiliária usa fluxo antigo (DADOS_REGISTRO)
+    if (segmento === 'imobiliaria') {
+      let respostaCompleta = '';
+      const stream = await anthropic.messages.stream({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        system: systemPromptFinal,
+        messages
+      });
+      for await (const chunk of stream) {
+        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+          respostaCompleta += chunk.delta.text;
+        }
+      }
+      let textoParaStream = respostaCompleta;
+      const idxPdf = textoParaStream.indexOf('GERAR_PDF:');
+      if (idxPdf !== -1) textoParaStream = textoParaStream.slice(0, idxPdf);
+      const idxReg = textoParaStream.indexOf('DADOS_REGISTRO:');
+      if (idxReg !== -1) textoParaStream = textoParaStream.slice(0, idxReg);
+      textoParaStream = textoParaStream.trim();
+      if (textoParaStream) res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoParaStream })}\n\n`);
+      const todosRegistros = [...respostaCompleta.matchAll(/DADOS_REGISTRO:({[^\n]+})/g)];
+      const matchPdf = respostaCompleta.match(/GERAR_PDF:({[\s\S]*})/);
+      const textoLimpo = respostaCompleta.replace(/\nDADOS_REGISTRO:[\s\S]*$/, '').replace(/\nGERAR_PDF:[\s\S]*$/, '').trim();
+      axios.post(appsScriptUrl, { texto: respostaCompleta, session_id, mensagem_usuario: mensagem }, { timeout: 15000 }).catch(() => {});
+      res.write(`data: ${JSON.stringify({ tipo: 'fim', texto_completo: textoLimpo, tem_registro: todosRegistros.length > 0, tem_pdf: !!matchPdf, dados_pdf: matchPdf ? matchPdf[1] : null })}\n\n`);
+      res.end();
+      return;
+    }
+
+    // ============================================================
+    // PET SHOP — TOOL USE
+    // ============================================================
+    let textoResposta = '';
+    let toolCalls = [];
+    let matchPdf = null;
 
     const stream = await anthropic.messages.stream({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
       system: systemPromptFinal,
+      tools: FIN_TOOLS,
+      tool_choice: { type: 'auto' },
       messages
     });
 
+    // Acumula blocos em streaming
+    // Mapa por índice de bloco (como a API retorna)
+    const blocksByIndex = {}; // index -> { id, name, inputStr, type }
+
     for await (const chunk of stream) {
+      // Início de qualquer bloco
+      if (chunk.type === 'content_block_start') {
+        const idx = chunk.index;
+        const block = chunk.content_block;
+        blocksByIndex[idx] = {
+          type: block.type,
+          id: block.id || null,
+          name: block.name || null,
+          inputStr: '',
+          text: '',
+          processed: false
+        };
+      }
+
+      // Delta de texto
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-        respostaCompleta += chunk.delta.text;
+        const idx = chunk.index;
+        if (blocksByIndex[idx]) {
+          blocksByIndex[idx].text += chunk.delta.text;
+          textoResposta += chunk.delta.text;
+        }
+      }
+
+      // Delta de input de tool (JSON parcial)
+      if (chunk.type === 'content_block_delta' && chunk.delta.type === 'input_json_delta') {
+        const idx = chunk.index;
+        if (blocksByIndex[idx]) {
+          blocksByIndex[idx].inputStr += chunk.delta.partial_json;
+        }
+      }
+
+      // Fim de bloco — se for tool_use, processa e executa
+      if (chunk.type === 'content_block_stop') {
+        const idx = chunk.index;
+        const block = blocksByIndex[idx];
+        if (block && block.type === 'tool_use' && !block.processed) {
+          block.processed = true;
+          try {
+            const input = JSON.parse(block.inputStr || '{}');
+            toolCalls.push({ id: block.id, name: block.name, input });
+            console.log(`[TOOL CALL] ${block.name} | input: ${JSON.stringify(input).slice(0, 150)}`);
+            // Dispara execução no Apps Script sem aguardar (fire-and-forget)
+            executarTool(block.name, input, appsScriptUrl, session_id);
+          } catch (e) {
+            console.error(`[TOOL PARSE ERROR] ${block.name}:`, e.message, '| raw:', block.inputStr?.slice(0, 200));
+          }
+        }
       }
     }
 
-    let textoParaStream = respostaCompleta;
-    const idxPdf = textoParaStream.indexOf('GERAR_PDF:');
-    if (idxPdf !== -1) textoParaStream = textoParaStream.slice(0, idxPdf);
-    const idxReg = textoParaStream.indexOf('DADOS_REGISTRO:');
-    if (idxReg !== -1) textoParaStream = textoParaStream.slice(0, idxReg);
-    textoParaStream = textoParaStream.trim();
-
-    if (textoParaStream) {
-      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoParaStream })}\n\n`);
+    // Filtra GERAR_PDF do texto
+    const idxPdf = textoResposta.indexOf('GERAR_PDF:');
+    if (idxPdf !== -1) {
+      const pdfStr = textoResposta.slice(idxPdf + 10).trim();
+      try { matchPdf = JSON.parse(pdfStr); } catch(e) {}
+      textoResposta = textoResposta.slice(0, idxPdf).trim();
     }
 
-    const todosRegistros = [...respostaCompleta.matchAll(/DADOS_REGISTRO:({[^\n]+})/g)];
-    const matchPdf = respostaCompleta.match(/GERAR_PDF:({[\s\S]*})/);
-
-    const textoLimpo = respostaCompleta
-      .replace(/\nDADOS_REGISTRO:[\s\S]*$/, '')
-      .replace(/\nGERAR_PDF:[\s\S]*$/, '')
-      .trim();
-
-    if (matchPdf) {
-      console.log(`[PDF] GERAR_PDF detectado: ${matchPdf[1].slice(0, 300)}`);
+    // Envia texto pro frontend
+    if (textoResposta.trim()) {
+      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoResposta.trim() })}\n\n`);
     }
 
+    // Salva histórico no Apps Script (texto + tool calls no formato compatível)
+    const toolCallsTexto = toolCalls.map(t => `\nDADOS_REGISTRO:${JSON.stringify({ acao: t.name, ...t.input })}`).join('');
+    const textoParaSalvar = textoResposta + toolCallsTexto;
     axios.post(appsScriptUrl, {
-      texto: respostaCompleta,
+      texto: textoParaSalvar,
       session_id,
       mensagem_usuario: mensagem
     }, { timeout: 15000 }).catch(err => console.error('Erro ao salvar histórico:', err.message));
 
+    // Evento de fim
     res.write(`data: ${JSON.stringify({
       tipo: 'fim',
-      texto_completo: textoLimpo,
-      tem_registro: todosRegistros.length > 0,
+      texto_completo: textoResposta.trim(),
+      tem_registro: toolCalls.length > 0,
       tem_pdf: !!matchPdf,
-      dados_pdf: matchPdf ? matchPdf[1] : null
+      dados_pdf: matchPdf ? JSON.stringify(matchPdf) : null
     })}\n\n`);
 
     res.end();
 
   } catch (err) {
-    console.error('Erro no streaming:', err.message);
+    console.error('Erro no chat:', err.message);
     res.write(`data: ${JSON.stringify({ tipo: 'erro', mensagem: 'Erro ao processar resposta' })}\n\n`);
     res.end();
   }
@@ -675,11 +918,7 @@ app.post('/pdf/:tipo', async (req, res) => {
   try {
     const { tipo } = req.params;
     const PDF_SERVICE_URL = process.env.PDF_SERVICE_URL || 'https://oren-pdf-service-production.up.railway.app';
-    console.log(`[PDF] Endpoint: ${tipo} | Body: ${JSON.stringify(req.body).slice(0, 400)}`);
-    const response = await axios.post(`${PDF_SERVICE_URL}/pdf/${tipo}`, req.body, {
-      timeout: 30000,
-      headers: { 'Content-Type': 'application/json' }
-    });
+    const response = await axios.post(`${PDF_SERVICE_URL}/pdf/${tipo}`, req.body, { timeout: 30000, headers: { 'Content-Type': 'application/json' } });
     res.json(response.data);
   } catch (err) {
     console.error('Erro ao gerar PDF:', err.message);
@@ -691,62 +930,30 @@ app.post('/pdf/:tipo', async (req, res) => {
 // NOTA FISCAL — emissão via Focus NFe
 // ============================================================
 app.post('/nota', async (req, res) => {
-  const {
-    slug,
-    descricao,
-    valor,
-    cnpj_prestador,
-    inscricao_municipal,
-    regime_tributario,
-    codigo_servico,
-    aliquota_iss,
-    cpf_tomador,
-    nome_tomador,
-    email_tomador
-  } = req.body;
-
+  const { slug, descricao, valor, cnpj_prestador, inscricao_municipal, regime_tributario, codigo_servico, aliquota_iss, cpf_tomador, nome_tomador, email_tomador } = req.body;
   const camposFaltando = [];
-  if (!descricao)           camposFaltando.push('descricao');
-  if (!valor)               camposFaltando.push('valor');
-  if (!cnpj_prestador)      camposFaltando.push('cnpj_prestador');
-  if (!inscricao_municipal)  camposFaltando.push('inscricao_municipal');
-  if (!codigo_servico)      camposFaltando.push('codigo_servico');
-  if (!aliquota_iss)        camposFaltando.push('aliquota_iss');
-  if (!cpf_tomador)         camposFaltando.push('cpf_tomador');
-  if (!nome_tomador)        camposFaltando.push('nome_tomador');
-
-  if (camposFaltando.length > 0) {
-    return res.status(400).json({
-      sucesso: false,
-      erro: `Campos obrigatórios faltando: ${camposFaltando.join(', ')}`
-    });
-  }
-
-  if (!FOCUS_TOKEN) {
-    return res.status(500).json({
-      sucesso: false,
-      erro: 'FOCUS_NFE_TOKEN não configurado. Adicione a variável de ambiente no Railway.'
-    });
-  }
-
+  if (!descricao) camposFaltando.push('descricao');
+  if (!valor) camposFaltando.push('valor');
+  if (!cnpj_prestador) camposFaltando.push('cnpj_prestador');
+  if (!inscricao_municipal) camposFaltando.push('inscricao_municipal');
+  if (!codigo_servico) camposFaltando.push('codigo_servico');
+  if (!aliquota_iss) camposFaltando.push('aliquota_iss');
+  if (!cpf_tomador) camposFaltando.push('cpf_tomador');
+  if (!nome_tomador) camposFaltando.push('nome_tomador');
+  if (camposFaltando.length > 0) return res.status(400).json({ sucesso: false, erro: `Campos obrigatórios faltando: ${camposFaltando.join(', ')}` });
+  if (!FOCUS_TOKEN) return res.status(500).json({ sucesso: false, erro: 'FOCUS_NFE_TOKEN não configurado.' });
   const agora = new Date();
-  const dataEmissao = agora.toISOString().replace('Z', '-03:00');
-  const dataCompetencia = agora.toISOString().split('T')[0];
-
   const valorNumerico = parseFloat(valor);
-  const aliquotaDecimal = parseFloat(aliquota_iss) / 100;
-  const valorIss = parseFloat((valorNumerico * aliquotaDecimal).toFixed(2));
-  const cpfLimpo = cpf_tomador.replace(/\D/g, '');
-
+  const valorIss = parseFloat((valorNumerico * parseFloat(aliquota_iss) / 100).toFixed(2));
   const payload = {
-    data_emissao: dataEmissao,
-    data_competencia: dataCompetencia,
+    data_emissao: agora.toISOString().replace('Z', '-03:00'),
+    data_competencia: agora.toISOString().split('T')[0],
     codigo_municipio_emissora: CODIGO_MUNICIPIO_BH,
     cnpj_prestador: cnpj_prestador.replace(/\D/g, ''),
     inscricao_municipal_prestador: inscricao_municipal,
     codigo_opcao_simples_nacional: parseInt(regime_tributario) === 1 ? 1 : 0,
     regime_especial_tributacao: 0,
-    cpf_tomador: cpfLimpo,
+    cpf_tomador: cpf_tomador.replace(/\D/g, ''),
     razao_social_tomador: nome_tomador.toUpperCase(),
     codigo_municipio_tomador: CODIGO_MUNICIPIO_BH,
     codigo_municipio_prestacao: CODIGO_MUNICIPIO_BH,
@@ -761,76 +968,28 @@ app.post('/nota', async (req, res) => {
     percentual_total_tributos_municipais: String(aliquota_iss),
     situacao_tributaria_pis_cofins: '07'
   };
-
   if (email_tomador) payload.email_tomador = email_tomador;
-
-  console.log(`[NOTA] Emitindo NFS-e | slug=${slug} | valor=${valor} | tomador=${nome_tomador} | ambiente=${FOCUS_AMBIENTE}`);
-
   try {
-    const response = await axios.post(
-      `${FOCUS_BASE_URL}/v2/nfsen?ambiente=${FOCUS_AMBIENTE}`,
-      payload,
-      {
-        auth: { username: FOCUS_TOKEN, password: '' },
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 30000
-      }
-    );
-
-    const dadosNota = response.data;
-    console.log(`[NOTA] Sucesso | ref=${dadosNota.ref || 'sem ref'} | status=${dadosNota.status}`);
-
-    return res.json({
-      sucesso: true,
-      ref: dadosNota.ref,
-      status: dadosNota.status,
-      numero: dadosNota.numero_nfse,
-      url_pdf: dadosNota.caminho_danfse || dadosNota.url || null,
-      dados_completos: dadosNota
-    });
-
+    const response = await axios.post(`${FOCUS_BASE_URL}/v2/nfsen?ambiente=${FOCUS_AMBIENTE}`, payload, { auth: { username: FOCUS_TOKEN, password: '' }, headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
+    const d = response.data;
+    return res.json({ sucesso: true, ref: d.ref, status: d.status, numero: d.numero_nfse, url_pdf: d.caminho_danfse || d.url || null, dados_completos: d });
   } catch (err) {
     const erroFocus = err.response?.data;
-    console.error('[NOTA] Erro Focus NFe:', JSON.stringify(erroFocus || err.message));
-    return res.status(500).json({
-      sucesso: false,
-      erro: erroFocus?.mensagem || erroFocus?.erros?.[0]?.mensagem || err.message,
-      detalhes: erroFocus || null
-    });
+    return res.status(500).json({ sucesso: false, erro: erroFocus?.mensagem || erroFocus?.erros?.[0]?.mensagem || err.message, detalhes: erroFocus || null });
   }
 });
 
 // ============================================================
-// NOTA FISCAL — consultar status por ref
+// NOTA FISCAL — consultar status
 // ============================================================
 app.get('/nota/:ref', async (req, res) => {
-  const { ref } = req.params;
-
-  if (!FOCUS_TOKEN) {
-    return res.status(500).json({ sucesso: false, erro: 'FOCUS_NFE_TOKEN não configurado.' });
-  }
-
+  if (!FOCUS_TOKEN) return res.status(500).json({ sucesso: false, erro: 'FOCUS_NFE_TOKEN não configurado.' });
   try {
-    const response = await axios.get(
-      `${FOCUS_BASE_URL}/v2/nfsen/${ref}?ambiente=${FOCUS_AMBIENTE}`,
-      {
-        auth: { username: FOCUS_TOKEN, password: '' },
-        timeout: 15000
-      }
-    );
-    const dados = response.data;
-    return res.json({
-      sucesso: true,
-      status: dados.status,
-      numero: dados.numero_nfse,
-      url_pdf: dados.caminho_danfse || dados.url || null,
-      dados_completos: dados
-    });
+    const response = await axios.get(`${FOCUS_BASE_URL}/v2/nfsen/${req.params.ref}?ambiente=${FOCUS_AMBIENTE}`, { auth: { username: FOCUS_TOKEN, password: '' }, timeout: 15000 });
+    const d = response.data;
+    return res.json({ sucesso: true, status: d.status, numero: d.numero_nfse, url_pdf: d.caminho_danfse || d.url || null, dados_completos: d });
   } catch (err) {
-    return res.status(500).json({
-      sucesso: false,
-      erro: err.response?.data?.mensagem || err.message
-    });
+    return res.status(500).json({ sucesso: false, erro: err.response?.data?.mensagem || err.message });
   }
 });
 
@@ -838,5 +997,5 @@ app.get('/nota/:ref', async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`Oren IA - Fin Backend rodando na porta ${PORT}`);
+  console.log(`Oren IA - Fin Backend v3 (tool use) rodando na porta ${PORT}`);
 });
