@@ -698,16 +698,16 @@ function getSystemPrompt(ctx) {
 // EXECUTAR TOOL NO APPS SCRIPT
 // ============================================================
 async function executarTool(toolName, toolInput, appsScriptUrl, sessionId) {
-  const payload = { acao: toolName, ...toolInput };
+  const payload = { acao: toolName, session_id: sessionId, ...toolInput };
   console.log(`[TOOL] ${toolName} | ${JSON.stringify(payload).slice(0, 200)}`);
   try {
-    // Converte tool_use num DADOS_REGISTRO para o Apps Script processar
-    const textoRegistro = `\nDADOS_REGISTRO:${JSON.stringify(payload)}`;
-    await axios.post(appsScriptUrl, {
-      texto: textoRegistro,
-      session_id: sessionId,
-      mensagem_usuario: ''
-    }, { timeout: 15000, maxRedirects: 5 });
+    // Modo tool use direto — manda acao no body
+    // Apps Script detecta body.acao e processa com LockService (sem passar pelo histórico)
+    await axios.post(appsScriptUrl, payload, {
+      timeout: 20000,
+      maxRedirects: 5,
+      headers: { 'Content-Type': 'application/json' }
+    });
     return { sucesso: true };
   } catch (err) {
     console.error(`[TOOL ERROR] ${toolName}:`, err.message);
