@@ -801,93 +801,72 @@ app.post('/chat', async (req, res) => {
     }
 
     // ============================================================
-    // PET SHOP — TOOL USE
+    // PET SHOP — TOOL USE (fluxo correto com loop)
     // ============================================================
-    let textoResposta = '';
+    let textoFinal = '';
     let toolCalls = [];
     let matchPdf = null;
+    let messagesLoop = [...messages];
 
-    const stream = await anthropic.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
-      system: systemPromptFinal,
-      tools: FIN_TOOLS,
-      tool_choice: { type: 'auto' },
-      messages
-    });
+    // Loop: continua até Claude responder sem tool_use
+    while (true) {
+      const response = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        system: systemPromptFinal,
+        tools: FIN_TOOLS,
+        tool_choice: { type: 'auto' },
+        messages: messagesLoop
+      });
 
-    // Acumula blocos em streaming
-    // Mapa por índice de bloco (como a API retorna)
-    const blocksByIndex = {}; // index -> { id, name, inputStr, type }
+      const currentToolCalls = response.content.filter(b => b.type === 'tool_use');
 
-    for await (const chunk of stream) {
-      // Início de qualquer bloco
-      if (chunk.type === 'content_block_start') {
-        const idx = chunk.index;
-        const block = chunk.content_block;
-        blocksByIndex[idx] = {
-          type: block.type,
-          id: block.id || null,
-          name: block.name || null,
-          inputStr: '',
-          text: '',
-          processed: false
+      // Sem tool calls = resposta final
+      if (currentToolCalls.length === 0 || response.stop_reason !== 'tool_use') {
+        const textBlocks = response.content.filter(b => b.type === 'text');
+        textoFinal = textBlocks.map(b => b.text).join('');
+        break;
+      }
+
+      console.log(`[TOOL USE] ${currentToolCalls.length} tool(s): ${currentToolCalls.map(t => t.name).join(', ')}`);
+
+      // Adiciona resposta do assistente ao histórico do loop
+      messagesLoop.push({ role: 'assistant', content: response.content });
+
+      // Executa todas as tools em paralelo e coleta resultados
+      const toolResults = await Promise.all(currentToolCalls.map(async (toolCall) => {
+        toolCalls.push({ id: toolCall.id, name: toolCall.name, input: toolCall.input });
+        console.log(`[TOOL CALL] ${toolCall.name} | ${JSON.stringify(toolCall.input).slice(0, 150)}`);
+        const resultado = await executarTool(toolCall.name, toolCall.input, appsScriptUrl, session_id);
+        return {
+          type: 'tool_result',
+          tool_use_id: toolCall.id,
+          content: resultado.sucesso
+            ? `Registrado com sucesso: ${toolCall.name}`
+            : `Erro ao registrar: ${resultado.erro || 'falha desconhecida'}`
         };
-      }
+      }));
 
-      // Delta de texto
-      if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-        const idx = chunk.index;
-        if (blocksByIndex[idx]) {
-          blocksByIndex[idx].text += chunk.delta.text;
-          textoResposta += chunk.delta.text;
-        }
-      }
-
-      // Delta de input de tool (JSON parcial)
-      if (chunk.type === 'content_block_delta' && chunk.delta.type === 'input_json_delta') {
-        const idx = chunk.index;
-        if (blocksByIndex[idx]) {
-          blocksByIndex[idx].inputStr += chunk.delta.partial_json;
-        }
-      }
-
-      // Fim de bloco — se for tool_use, processa e executa
-      if (chunk.type === 'content_block_stop') {
-        const idx = chunk.index;
-        const block = blocksByIndex[idx];
-        if (block && block.type === 'tool_use' && !block.processed) {
-          block.processed = true;
-          try {
-            const input = JSON.parse(block.inputStr || '{}');
-            toolCalls.push({ id: block.id, name: block.name, input });
-            console.log(`[TOOL CALL] ${block.name} | input: ${JSON.stringify(input).slice(0, 150)}`);
-            // Dispara execução no Apps Script sem aguardar (fire-and-forget)
-            executarTool(block.name, input, appsScriptUrl, session_id);
-          } catch (e) {
-            console.error(`[TOOL PARSE ERROR] ${block.name}:`, e.message, '| raw:', block.inputStr?.slice(0, 200));
-          }
-        }
-      }
+      // Adiciona resultados ao histórico e volta ao topo do loop
+      messagesLoop.push({ role: 'user', content: toolResults });
     }
 
-    // Filtra GERAR_PDF do texto
-    const idxPdf = textoResposta.indexOf('GERAR_PDF:');
+    // Filtra GERAR_PDF do texto final
+    const idxPdf = textoFinal.indexOf('GERAR_PDF:');
     if (idxPdf !== -1) {
-      const pdfStr = textoResposta.slice(idxPdf + 10).trim();
+      const pdfStr = textoFinal.slice(idxPdf + 10).trim();
       try { matchPdf = JSON.parse(pdfStr); } catch(e) {}
-      textoResposta = textoResposta.slice(0, idxPdf).trim();
+      textoFinal = textoFinal.slice(0, idxPdf).trim();
     }
 
-    // Envia texto pro frontend
-    if (textoResposta.trim()) {
-      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoResposta.trim() })}\n\n`);
+    // Envia texto final pro frontend
+    if (textoFinal.trim()) {
+      res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoFinal.trim() })}\n\n`);
     }
 
-    // Salva histórico — apenas texto, SEM tool calls
-    // Os tool calls já foram executados via executarTool() — incluí-los aqui causaria dupla execução
+    // Salva histórico — apenas texto final (tools já foram executadas via executarTool)
     axios.post(appsScriptUrl, {
-      texto: textoResposta.trim(),
+      texto: textoFinal.trim(),
       session_id,
       mensagem_usuario: mensagem
     }, { timeout: 15000 }).catch(err => console.error('Erro ao salvar histórico:', err.message));
@@ -895,7 +874,7 @@ app.post('/chat', async (req, res) => {
     // Evento de fim
     res.write(`data: ${JSON.stringify({
       tipo: 'fim',
-      texto_completo: textoResposta.trim(),
+      texto_completo: textoFinal.trim(),
       tem_registro: toolCalls.length > 0,
       tem_pdf: !!matchPdf,
       dados_pdf: matchPdf ? JSON.stringify(matchPdf) : null
