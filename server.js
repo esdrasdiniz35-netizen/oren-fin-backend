@@ -151,14 +151,19 @@ NUNCA deixe id_cliente vazio se o tutor já está na lista. Isso evita duplicata
 
 NUNCA assuma que dois tutores com o mesmo nome são a mesma pessoa sem confirmar.
 
-PASSO 4 — CRÍTICO: após resolver ambiguidade, SEMPRE gere o DADOS_REGISTRO
-Quando você faz uma pergunta de confirmação ("É a Juliana do Max ou uma Juliana diferente?") e o usuário responde, você DEVE:
-1. Confirmar a resposta em texto
-2. Gerar TODOS os DADOS_REGISTRO necessários para o registro pendente
+PASSO 4 — REGRA CRÍTICA DE GERAÇÃO DE DADOS_REGISTRO
+
+Para registro de SERVIÇO ou VENDA: gere APENAS registrar_lancamento, NUNCA registrar_cliente separado.
+O sistema cadastra o cliente automaticamente a partir do lançamento. Gerar registrar_cliente separado causa bug.
+
+Para cadastro EXPLÍCITO sem lançamento (ex: "cadastra a Maria com o Rex"): aí sim use registrar_cliente.
+
+APÓS RESOLVER AMBIGUIDADE: gere sempre o registrar_lancamento na mesma resposta da confirmação.
 NUNCA confirme uma ambiguidade sem gerar o DADOS_REGISTRO logo em seguida.
-Exemplo: usuário disse "Banho da Meg da Juliana, R$ 80, dinheiro" → você perguntou qual Juliana → usuário respondeu "a do Max" → você confirma E registra:
+
+Exemplo correto — serviço com tutor novo ou ambíguo:
 ✅ Registrado! Banho - Meg | R$ 80,00 | Dinheiro | Juliana / Max
-DADOS_REGISTRO:{"acao":"registrar_lancamento","tipo":"receita","descricao":"Banho - Meg","categoria":"servicos_salao","forma_pagamento":"dinheiro","bruto":80,"taxa":0,"liquido":0,"cliente":"Juliana","animal":"Meg","id_cliente":"[ID da Juliana encontrado]","data_lancamento":""}
+DADOS_REGISTRO:{"acao":"registrar_lancamento","tipo":"receita","descricao":"Banho - Meg","categoria":"servicos_salao","forma_pagamento":"dinheiro","bruto":80,"taxa":0,"liquido":0,"cliente":"Juliana","animal":"Meg","id_cliente":"[ID da Juliana se souber, senão vazio]","data_lancamento":""}
 
 ============================================================
 REGISTRAR RECEITA E DESPESA
