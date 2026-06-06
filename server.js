@@ -833,19 +833,24 @@ app.post('/chat', async (req, res) => {
       // Adiciona resposta do assistente ao histórico do loop
       messagesLoop.push({ role: 'assistant', content: response.content });
 
-      // Executa todas as tools em paralelo e coleta resultados
-      const toolResults = await Promise.all(currentToolCalls.map(async (toolCall) => {
+      // Executa tools em SEQUÊNCIA (Apps Script não suporta concorrência)
+      const toolResults = [];
+      for (const toolCall of currentToolCalls) {
         toolCalls.push({ id: toolCall.id, name: toolCall.name, input: toolCall.input });
         console.log(`[TOOL CALL] ${toolCall.name} | ${JSON.stringify(toolCall.input).slice(0, 150)}`);
         const resultado = await executarTool(toolCall.name, toolCall.input, appsScriptUrl, session_id);
-        return {
+        toolResults.push({
           type: 'tool_result',
           tool_use_id: toolCall.id,
           content: resultado.sucesso
             ? `Registrado com sucesso: ${toolCall.name}`
             : `Erro ao registrar: ${resultado.erro || 'falha desconhecida'}`
-        };
-      }));
+        });
+        // Pequena pausa entre tools para evitar sobrecarga no Apps Script
+        if (currentToolCalls.indexOf(toolCall) < currentToolCalls.length - 1) {
+          await new Promise(r => setTimeout(r, 300));
+        }
+      }
 
       // Adiciona resultados ao histórico e volta ao topo do loop
       messagesLoop.push({ role: 'user', content: toolResults });
