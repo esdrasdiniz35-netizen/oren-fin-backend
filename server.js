@@ -884,11 +884,10 @@ app.post('/chat', async (req, res) => {
       res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoResposta.trim() })}\n\n`);
     }
 
-    // Salva histórico no Apps Script (texto + tool calls no formato compatível)
-    const toolCallsTexto = toolCalls.map(t => `\nDADOS_REGISTRO:${JSON.stringify({ acao: t.name, ...t.input })}`).join('');
-    const textoParaSalvar = textoResposta + toolCallsTexto;
+    // Salva histórico — apenas texto, SEM tool calls
+    // Os tool calls já foram executados via executarTool() — incluí-los aqui causaria dupla execução
     axios.post(appsScriptUrl, {
-      texto: textoParaSalvar,
+      texto: textoResposta.trim(),
       session_id,
       mensagem_usuario: mensagem
     }, { timeout: 15000 }).catch(err => console.error('Erro ao salvar histórico:', err.message));
