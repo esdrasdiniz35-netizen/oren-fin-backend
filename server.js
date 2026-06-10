@@ -13,9 +13,6 @@ const FOCUS_AMBIENTE = process.env.FOCUS_NFE_AMBIENTE || 'homologacao';
 const FOCUS_BASE_URL = 'https://api.focusnfe.com.br';
 const CODIGO_MUNICIPIO_BH = 3106200;
 
-// ============================================================
-// GOOGLE AUTH + CACHE
-// ============================================================
 function getGoogleAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   return new google.auth.GoogleAuth({
@@ -59,9 +56,6 @@ async function resolveAppsScriptUrl(slug) {
   }
 }
 
-// ============================================================
-// CORS + MIDDLEWARE
-// ============================================================
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || /\.orenia\.com\.br$/.test(origin)) return callback(null, true);
@@ -77,10 +71,6 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ============================================================
-// TOOLS DEFINITION — petshop
-// Cada tool mapeia para uma ação no Apps Script
-// ============================================================
 const FIN_TOOLS = [
   {
     name: 'registrar_lancamento',
@@ -380,9 +370,6 @@ const FIN_TOOLS = [
   }
 ];
 
-// ============================================================
-// SYSTEM PROMPT — PET SHOP v3 (sem DADOS_REGISTRO)
-// ============================================================
 const SYSTEM_PROMPT_PETSHOP = `Você é o Fin, assistente financeiro inteligente da Oren IA, criado para donos de pet shops controlarem finanças em linguagem natural — sem planilha, sem sistema complexo.
 
 ============================================================
@@ -578,9 +565,6 @@ GERAR_PDF:{"tipo":"contabil-detalhado","dados":{"estabelecimento":"[nome]","peri
 --- ranking-servicos ---
 GERAR_PDF:{"tipo":"ranking-servicos","dados":{"estabelecimento":"[nome]","periodo":"[MM/AAAA]","servicos":[{"nome":"","receita":0,"quantidade":0}]}}`;
 
-// ============================================================
-// SYSTEM PROMPT — IMOBILIÁRIA (mantém DADOS_REGISTRO)
-// ============================================================
 const SYSTEM_PROMPT_IMOBILIARIA = `Você é o Fin, assistente financeiro inteligente da Oren IA. Criado para ajudar imobiliárias e corretores a controlar suas finanças, administrar aluguéis e calcular repasses de forma simples, conversando em linguagem natural.
 
 IDENTIDADE E PERSONALIDADE
@@ -667,9 +651,6 @@ GERAÇÃO DE PDF
 GERAR_PDF:{"tipo":"[endpoint]","dados":{...}}
 Nunca inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta.`;
 
-// ============================================================
-// SYSTEM PROMPT DINÂMICO
-// ============================================================
 function getSystemPrompt(ctx) {
   const segmento = ctx.segmento || 'pet_shop';
   if (segmento === 'imobiliaria') {
@@ -694,15 +675,10 @@ function getSystemPrompt(ctx) {
     .replace('{contexto_sheets}', ctx.contexto || '');
 }
 
-// ============================================================
-// EXECUTAR TOOL NO APPS SCRIPT
-// ============================================================
 async function executarTool(toolName, toolInput, appsScriptUrl, sessionId) {
   const payload = { acao: toolName, session_id: sessionId, ...toolInput };
   console.log(`[TOOL] ${toolName} | ${JSON.stringify(payload).slice(0, 200)}`);
   try {
-    // Modo tool use direto — manda acao no body
-    // Apps Script detecta body.acao e processa com LockService (sem passar pelo histórico)
     await axios.post(appsScriptUrl, payload, {
       timeout: 20000,
       maxRedirects: 5,
@@ -715,16 +691,10 @@ async function executarTool(toolName, toolInput, appsScriptUrl, sessionId) {
   }
 }
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'Oren IA - Fin Backend v3 (tool use)' });
 });
 
-// ============================================================
-// CONTEXTO
-// ============================================================
 app.get('/contexto', async (req, res) => {
   const { session_id = 'default', slug } = req.query;
   try {
@@ -737,9 +707,6 @@ app.get('/contexto', async (req, res) => {
   }
 });
 
-// ============================================================
-// SALVAR (mantido para compatibilidade)
-// ============================================================
 app.post('/salvar', async (req, res) => {
   const { texto, session_id = 'default', mensagem_usuario = '', slug } = req.body;
   try {
@@ -752,9 +719,6 @@ app.post('/salvar', async (req, res) => {
   }
 });
 
-// ============================================================
-// CHAT — STREAMING COM TOOL USE (petshop) / DADOS_REGISTRO (imobiliária)
-// ============================================================
 app.post('/chat', async (req, res) => {
   const { mensagem, historico = [], contexto = {}, session_id = 'default', slug } = req.body;
   const ctx = contexto || {};
@@ -770,11 +734,11 @@ app.post('/chat', async (req, res) => {
   try {
     const appsScriptUrl = await resolveAppsScriptUrl(slug);
 
-    // Imobiliária usa fluxo antigo (DADOS_REGISTRO)
+    // Imobiliária — fluxo legado DADOS_REGISTRO
     if (segmento === 'imobiliaria') {
       let respostaCompleta = '';
       const stream = await anthropic.messages.stream({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 2048,
         system: systemPromptFinal,
         messages
@@ -800,18 +764,15 @@ app.post('/chat', async (req, res) => {
       return;
     }
 
-    // ============================================================
-    // PET SHOP — TOOL USE (fluxo correto com loop)
-    // ============================================================
+    // Pet shop — tool use
     let textoFinal = '';
     let toolCalls = [];
     let matchPdf = null;
     let messagesLoop = [...messages];
 
-    // Loop: continua até Claude responder sem tool_use
     while (true) {
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 2048,
         system: systemPromptFinal,
         tools: FIN_TOOLS,
@@ -821,7 +782,6 @@ app.post('/chat', async (req, res) => {
 
       const currentToolCalls = response.content.filter(b => b.type === 'tool_use');
 
-      // Sem tool calls = resposta final
       if (currentToolCalls.length === 0 || response.stop_reason !== 'tool_use') {
         const textBlocks = response.content.filter(b => b.type === 'text');
         textoFinal = textBlocks.map(b => b.text).join('');
@@ -830,10 +790,8 @@ app.post('/chat', async (req, res) => {
 
       console.log(`[TOOL USE] ${currentToolCalls.length} tool(s): ${currentToolCalls.map(t => t.name).join(', ')}`);
 
-      // Adiciona resposta do assistente ao histórico do loop
       messagesLoop.push({ role: 'assistant', content: response.content });
 
-      // Executa tools em SEQUÊNCIA (Apps Script não suporta concorrência)
       const toolResults = [];
       for (const toolCall of currentToolCalls) {
         toolCalls.push({ id: toolCall.id, name: toolCall.name, input: toolCall.input });
@@ -846,17 +804,14 @@ app.post('/chat', async (req, res) => {
             ? `Registrado com sucesso: ${toolCall.name}`
             : `Erro ao registrar: ${resultado.erro || 'falha desconhecida'}`
         });
-        // Pequena pausa entre tools para evitar sobrecarga no Apps Script
         if (currentToolCalls.indexOf(toolCall) < currentToolCalls.length - 1) {
           await new Promise(r => setTimeout(r, 300));
         }
       }
 
-      // Adiciona resultados ao histórico e volta ao topo do loop
       messagesLoop.push({ role: 'user', content: toolResults });
     }
 
-    // Filtra GERAR_PDF do texto final
     const idxPdf = textoFinal.indexOf('GERAR_PDF:');
     if (idxPdf !== -1) {
       const pdfStr = textoFinal.slice(idxPdf + 10).trim();
@@ -864,19 +819,16 @@ app.post('/chat', async (req, res) => {
       textoFinal = textoFinal.slice(0, idxPdf).trim();
     }
 
-    // Envia texto final pro frontend
     if (textoFinal.trim()) {
       res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoFinal.trim() })}\n\n`);
     }
 
-    // Salva histórico — apenas texto final (tools já foram executadas via executarTool)
     axios.post(appsScriptUrl, {
       texto: textoFinal.trim(),
       session_id,
       mensagem_usuario: mensagem
     }, { timeout: 15000 }).catch(err => console.error('Erro ao salvar histórico:', err.message));
 
-    // Evento de fim
     res.write(`data: ${JSON.stringify({
       tipo: 'fim',
       texto_completo: textoFinal.trim(),
@@ -894,9 +846,6 @@ app.post('/chat', async (req, res) => {
   }
 });
 
-// ============================================================
-// PDF
-// ============================================================
 app.post('/pdf/:tipo', async (req, res) => {
   try {
     const { tipo } = req.params;
@@ -909,9 +858,6 @@ app.post('/pdf/:tipo', async (req, res) => {
   }
 });
 
-// ============================================================
-// NOTA FISCAL — emissão via Focus NFe
-// ============================================================
 app.post('/nota', async (req, res) => {
   const { slug, descricao, valor, cnpj_prestador, inscricao_municipal, regime_tributario, codigo_servico, aliquota_iss, cpf_tomador, nome_tomador, email_tomador } = req.body;
   const camposFaltando = [];
@@ -962,9 +908,6 @@ app.post('/nota', async (req, res) => {
   }
 });
 
-// ============================================================
-// NOTA FISCAL — consultar status
-// ============================================================
 app.get('/nota/:ref', async (req, res) => {
   if (!FOCUS_TOKEN) return res.status(500).json({ sucesso: false, erro: 'FOCUS_NFE_TOKEN não configurado.' });
   try {
@@ -976,9 +919,6 @@ app.get('/nota/:ref', async (req, res) => {
   }
 });
 
-// ============================================================
-// START
-// ============================================================
 app.listen(PORT, () => {
   console.log(`Oren IA - Fin Backend v3 (tool use) rodando na porta ${PORT}`);
 });
