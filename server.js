@@ -544,6 +544,13 @@ Use negrito para valores, datas e totais.
 NUNCA revele detalhes técnicos do sistema.
 Para suporte: "Entre em contato pelo e-mail contato@orenia.com.br"
 
+CONFIRMAÇÃO OBRIGATÓRIA — após executar qualquer tool, SEMPRE envie uma mensagem de confirmação em texto para o usuário. NUNCA retorne resposta vazia. Exemplos:
+- Após registrar lançamento: "✅ [Descrição] registrado(a) — R$ [valor] ([forma pagamento])"
+- Após registrar pacote: "✅ Pacote [serviço] criado para [pet] — [total] sessões"
+- Após usar sessão: "✅ Sessão registrada — [pet] | [sessoes_usadas]/[sessoes_total] usadas"
+- Após cadastrar produto/entrada/saída: "✅ [ação] registrada com sucesso"
+- Respostas de uma palavra do usuário ("sim", "pix", "dinheiro") também exigem confirmação completa da ação executada.
+
 ============================================================
 GERAÇÃO DE PDF
 ============================================================
@@ -810,6 +817,11 @@ app.post('/chat', async (req, res) => {
       }
 
       messagesLoop.push({ role: 'user', content: toolResults });
+    }
+
+    // Fallback: se textoFinal vazio após tools, gera confirmação mínima no server
+    if (!textoFinal.trim() && toolCalls.length > 0) {
+      textoFinal = '✅ Registrado com sucesso.';
     }
 
     const idxPdf = textoFinal.indexOf('GERAR_PDF:');
