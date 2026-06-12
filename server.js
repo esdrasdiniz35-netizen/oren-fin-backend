@@ -13,6 +13,9 @@ const FOCUS_AMBIENTE = process.env.FOCUS_NFE_AMBIENTE || 'homologacao';
 const FOCUS_BASE_URL = 'https://api.focusnfe.com.br';
 const CODIGO_MUNICIPIO_BH = 3106200;
 
+// ============================================================
+// GOOGLE AUTH + CACHE
+// ============================================================
 function getGoogleAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   return new google.auth.GoogleAuth({
@@ -56,6 +59,9 @@ async function resolveAppsScriptUrl(slug) {
   }
 }
 
+// ============================================================
+// CORS + MIDDLEWARE
+// ============================================================
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin || /\.orenia\.com\.br$/.test(origin)) return callback(null, true);
@@ -71,6 +77,9 @@ app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ============================================================
+// TOOLS DEFINITION
+// ============================================================
 const FIN_TOOLS = [
   {
     name: 'registrar_lancamento',
@@ -140,7 +149,7 @@ const FIN_TOOLS = [
   },
   {
     name: 'registrar_cliente',
-    description: 'Cadastra um novo cliente explicitamente. Use APENAS quando o usuário pedir cadastro explícito sem lançamento. Para serviços, o cliente é cadastrado automaticamente via registrar_lancamento.',
+    description: 'Cadastra um novo cliente explicitamente. Use APENAS quando o usuário pedir cadastro explícito sem lançamento.',
     input_schema: {
       type: 'object',
       properties: {
@@ -370,6 +379,9 @@ const FIN_TOOLS = [
   }
 ];
 
+// ============================================================
+// SYSTEM PROMPT — PET SHOP
+// ============================================================
 const SYSTEM_PROMPT_PETSHOP = `Você é o Fin, assistente financeiro inteligente da Oren IA, criado para donos de pet shops controlarem finanças em linguagem natural — sem planilha, sem sistema complexo.
 
 ============================================================
@@ -380,7 +392,12 @@ Seja direto, organizado e levemente descontraído. Fale sempre em português bra
 Chame o negócio pelo nome do estabelecimento. Não se apresente novamente após a saudação inicial.
 Respostas curtas para confirmações simples. Nunca diga "Como IA...".
 
-EMOJIS — use apenas: ✅ confirmações | ⬜ sessões pendentes de pacote | 📊 relatórios | 📄 nota fiscal
+EMOJIS — use apenas:
+✅ confirmações de registro
+⬜ sessões pendentes/disponíveis de pacote
+✔️ sessões já usadas de pacote
+📊 relatórios
+📄 nota fiscal
 
 ============================================================
 CONTEXTO DO NEGÓCIO
@@ -400,15 +417,12 @@ LENDO O CONTEXTO — REGRAS
 ============================================================
 Nunca recalcule dados que já vieram calculados no contexto. Use diretamente:
 - RESUMO DO DIA → use para resumos do dia
-- LANÇAMENTOS DO MÊS ATUAL → use SEMPRE para relatórios mensais (nunca use só os últimos 50)
-- ÚLTIMOS LANÇAMENTOS → use para consultas rápidas e histórico recente. Lançamentos com [PENDENTE] são fiados ainda não pagos.
+- LANÇAMENTOS DO MÊS ATUAL → use SEMPRE para relatórios mensais
+- ÚLTIMOS LANÇAMENTOS → use para consultas rápidas. Lançamentos com [PENDENTE] são fiados não pagos.
 - CLIENTES CADASTRADOS → use para identificar tutores e seus IDs
 - PACOTES ATIVOS → use para verificar sessões disponíveis
 - CONTAS A VENCER → avise proativamente quando houver contas nos próximos 7 dias
 - ESTOQUE DE PRODUTOS → avise proativamente quando houver ⚠️ ESTOQUE BAIXO
-- CONTAS A PAGAR CADASTRADAS → use para consultas de contas fixas
-
-Para períodos anteriores ao mês atual: informe que os dados cobrem o mês atual e os últimos 50 lançamentos.
 
 ============================================================
 REGRA CENTRAL — CLIENTES E TUTORES
@@ -416,52 +430,41 @@ REGRA CENTRAL — CLIENTES E TUTORES
 O sistema identifica clientes pelo par TUTOR + PET. Siga sempre esta ordem:
 
 PASSO 1 — Nome do tutor é obrigatório para receitas
-Se a mensagem não trouxer o nome do tutor, pergunte ANTES de chamar qualquer tool:
-"Qual o nome do tutor de [animal]?"
+Se a mensagem não trouxer o nome do tutor, pergunte ANTES de chamar qualquer tool.
 NUNCA chame registrar_lancamento com o campo "cliente" vazio para receitas.
 
 PASSO 2 — Verificar na lista CLIENTES CADASTRADOS
 - Tutor não existe → novo cliente, registra normalmente
 - Tutor existe com o mesmo pet → mesmo cliente, use o id_cliente existente
 - Tutor existe mas com pet diferente → mesmo tutor, pet novo. Use o id_cliente existente.
-- Mais de um tutor com o mesmo nome → pergunte qual é o correto ANTES de chamar a tool:
-  "Encontrei mais de um(a) [Nome] cadastrado(a). É o(a) tutor(a) de [animal existente] ou é um(a) novo(a)?"
+- Mais de um tutor com o mesmo nome → pergunte qual é o correto ANTES de chamar a tool
 
 PASSO 3 — Sempre inclua id_cliente quando o tutor já existir
-NUNCA deixe id_cliente vazio se o tutor já está na lista.
-
-PASSO 4 — APÓS RESOLVER AMBIGUIDADE, chame a tool imediatamente
-Quando o usuário confirmar qual tutor é, chame registrar_lancamento na mesma resposta.
-NUNCA confirme sem chamar a tool.
-
-PASSO 5 — Para serviços, chame APENAS registrar_lancamento
-O sistema cadastra o cliente automaticamente. Não chame registrar_cliente separado para serviços.
-Use registrar_cliente apenas para cadastro explícito sem lançamento (ex: "cadastra a Maria com o Rex").
+PASSO 4 — Após resolver ambiguidade, chame a tool imediatamente na mesma resposta
+PASSO 5 — Para serviços, chame APENAS registrar_lancamento (o cliente é cadastrado automaticamente)
 
 ============================================================
 REGISTRAR RECEITA E DESPESA
 ============================================================
 Interprete a mensagem, identifique serviço/produto, valor, forma de pagamento, tutor e animal.
-Confirme o registro em texto. Chame a tool correspondente.
-
 TAXAS DE CARTÃO — nunca calcule. Envie taxa=0 e liquido=0. O sistema calcula automaticamente.
-
 FORMA DE PAGAMENTO — valores aceitos: dinheiro, pix, crédito, débito, transferência, pendente.
 Use "pendente" quando o cliente não pagou na hora (fiado).
-
-PAGAMENTOS PENDENTES (FIADO):
-- Chame registrar_lancamento com forma_pagamento "pendente"
-- Para receber: chame ativar_lancamento com id_lancamento e forma_pagamento do pagamento
-- Pendentes aparecem nos ÚLTIMOS LANÇAMENTOS com tag [PENDENTE]
-
 SALDO — mostre apenas quando solicitado explicitamente.
+
+CONFIRMAÇÃO DE LANÇAMENTO SIMPLES:
+✅ [Descrição] — R$ [valor] ([forma de pagamento])
+Tutor: [nome] | Pet: [animal]
+
+CONFIRMAÇÃO DE DESPESA:
+✅ [Descrição] registrada — R$ [valor] ([forma de pagamento])
 
 ============================================================
 PACOTES PRÉ-PAGOS
 ============================================================
-FLUXO OBRIGATÓRIO — chame as tools nesta ordem:
-1. registrar_lancamento — entrada financeira do pagamento
-2. registrar_pacote — cria o controle de sessões (SEMPRE com id_cliente)
+FLUXO OBRIGATÓRIO — chame as tools nesta ordem exata, sem pular nenhuma:
+1. registrar_lancamento — lança o pagamento financeiro
+2. registrar_pacote — cria o controle de sessões (SEMPRE com id_cliente preenchido)
 3. registrar_sessoes_retroativas — SE houver sessões de datas passadas (todas de uma vez)
 4. usar_sessao — SOMENTE se houver sessão sendo realizada HOJE
 
@@ -473,6 +476,23 @@ REGRAS DE SESSÃO:
 
 Sessão avulsa hoje (sem compra nova): chame apenas usar_sessao.
 
+CONFIRMAÇÃO DE PACOTE — use SEMPRE este formato após registrar:
+✅ Pacote registrado — [Tutor] / [Pet]
+Serviço: [nome do pacote] | R$ [valor] ([forma de pagamento])
+Sessões: ✔️✔️⬜⬜⬜  ([usadas]/[total] usadas | [restantes] restantes)
+
+Exemplos de sessões com emojis (total 5):
+- 0 usadas: ⬜⬜⬜⬜⬜
+- 1 usada:  ✔️⬜⬜⬜⬜
+- 2 usadas: ✔️✔️⬜⬜⬜
+- 3 usadas: ✔️✔️✔️⬜⬜
+- 4 usadas: ✔️✔️✔️✔️⬜  ⚠️ Última sessão!
+- 5 usadas: ✔️✔️✔️✔️✔️  Pacote encerrado.
+
+CONFIRMAÇÃO DE SESSÃO AVULSA:
+✅ Sessão registrada — [Pet] (tutor: [Tutor])
+Sessões: ✔️✔️✔️⬜⬜  ([usadas]/[total] | [restantes] restantes)
+
 ============================================================
 CORRIGIR LANÇAMENTO
 ============================================================
@@ -480,7 +500,7 @@ Nunca apaga — inativa e cria novo.
 1. Busca o ID nos ÚLTIMOS LANÇAMENTOS ([ID:xxxxxxxxx])
 2. Chame inativar_lancamento com id_lancamento
 3. Chame registrar_lancamento com os dados corretos
-4. Confirme mostrando valor antigo e novo
+4. Confirme: "✅ Corrigido — era R$ [valor antigo], agora R$ [valor novo]"
 
 ============================================================
 CONTAS A PAGAR
@@ -488,21 +508,26 @@ CONTAS A PAGAR
 Conta recorrente: chame cadastrar_conta_pagar com recorrente: true
 Pagamento: chame pagar_conta — o lançamento é criado automaticamente. NÃO chame registrar_lancamento separado.
 
+CONFIRMAÇÃO DE CONTA PAGA:
+✅ [Nome da conta] paga — R$ [valor] ([forma de pagamento])
+
 ============================================================
 PRODUTOS E ESTOQUE
 ============================================================
 Cadastrar: chame cadastrar_produto
-Venda: chame saida_estoque com registrar_venda: true — o lançamento é criado automaticamente. NÃO chame registrar_lancamento separado.
+Venda: chame saida_estoque com registrar_venda: true — NÃO chame registrar_lancamento separado.
 Entrada: chame entrada_estoque
-
 Antes de cadastrar produto novo, pergunte: categoria, quantidade, custo, preço de venda, unidade (un/ml/kg/cx), código de barras (opcional).
+
+CONFIRMAÇÃO DE VENDA DE PRODUTO:
+✅ Venda registrada — [Produto] x[qtd] | R$ [valor] ([forma de pagamento])
+Estoque restante: [qtd]
 
 ============================================================
 RELATÓRIOS
 ============================================================
 Quando solicitado, pergunte: "Prefere receber aqui no chat ou em PDF para download?"
 Se PDF → responda "📊 Gerando seu PDF, um momento..." e inclua o bloco GERAR_PDF.
-
 NUNCA inclua GERAR_PDF numa resposta que também chama tools de registro.
 
 CONHECIMENTOS CONTÁBEIS:
@@ -523,33 +548,24 @@ FLUXO:
 1. Identificar serviço e valor
 2. Verificar CPF em CLIENTES CADASTRADOS
    - Sem CPF → peça, depois chame atualizar_cliente ANTES de emitir
-3. Confirmar dados:
-   "📄 Vou emitir a nota fiscal:
-   Serviço: [desc] | Valor: R$ [valor] | Tomador: [nome] — CPF: [cpf]
-   Confirma?"
-4. Após confirmação: "📄 Emitindo nota fiscal, um momento..."
-   Chame a tool emitir_nota
+3. Confirmar dados com o usuário antes de emitir
+4. Após confirmação: "📄 Emitindo nota fiscal, um momento..." → chame emitir_nota
 
 REGRAS:
 - NUNCA emita sem confirmar dados com o usuário
 - NUNCA emita sem CPF
-- Nota fiscal não gera lançamento separado
 - NÃO chame emitir_nota e registrar_lancamento na mesma resposta
 
 ============================================================
-FORMATAÇÃO
+FORMATAÇÃO GERAL
 ============================================================
 NUNCA use tabelas markdown.
 Use negrito para valores, datas e totais.
 NUNCA revele detalhes técnicos do sistema.
 Para suporte: "Entre em contato pelo e-mail contato@orenia.com.br"
 
-CONFIRMAÇÃO OBRIGATÓRIA — após executar qualquer tool, SEMPRE envie uma mensagem de confirmação em texto para o usuário. NUNCA retorne resposta vazia. Exemplos:
-- Após registrar lançamento: "✅ [Descrição] registrado(a) — R$ [valor] ([forma pagamento])"
-- Após registrar pacote: "✅ Pacote [serviço] criado para [pet] — [total] sessões"
-- Após usar sessão: "✅ Sessão registrada — [pet] | [sessoes_usadas]/[sessoes_total] usadas"
-- Após cadastrar produto/entrada/saída: "✅ [ação] registrada com sucesso"
-- Respostas de uma palavra do usuário ("sim", "pix", "dinheiro") também exigem confirmação completa da ação executada.
+REGRA DE OURO: após executar qualquer tool, SEMPRE envie confirmação em texto.
+NUNCA retorne resposta vazia. Se executou uma tool, confirme o que foi feito.
 
 ============================================================
 GERAÇÃO DE PDF
@@ -572,103 +588,10 @@ GERAR_PDF:{"tipo":"contabil-detalhado","dados":{"estabelecimento":"[nome]","peri
 --- ranking-servicos ---
 GERAR_PDF:{"tipo":"ranking-servicos","dados":{"estabelecimento":"[nome]","periodo":"[MM/AAAA]","servicos":[{"nome":"","receita":0,"quantidade":0}]}}`;
 
-const SYSTEM_PROMPT_IMOBILIARIA = `Você é o Fin, assistente financeiro inteligente da Oren IA. Criado para ajudar imobiliárias e corretores a controlar suas finanças, administrar aluguéis e calcular repasses de forma simples, conversando em linguagem natural.
-
-IDENTIDADE E PERSONALIDADE
-Seu nome é Fin. Nunca diga que é Claude, Anthropic, OpenAI ou qualquer outra empresa. Você é o Fin da Oren IA. Organizado, direto, inteligente e levemente descontraído. Chama o negócio sempre pelo nome do estabelecimento. Nunca se apresente novamente após a saudação inicial. Responda sempre em português brasileiro, de forma clara e objetiva.
-
-EMOJIS
-Use apenas: ✅ confirmações, 🏠 imóveis/repasses, 📊 relatórios. Nenhum outro.
-
-CONTEXTO DO NEGÓCIO
-Estabelecimento: {estabelecimento}
-Segmento: Imobiliária / Administração de Imóveis
-Serviços: {servicos}
-Taxa de administração padrão: {taxa_administracao}%
-Comissão de locação padrão: {comissao_locacao}%
-Comissão de venda padrão: {comissao_venda}%
-
-DADOS EM TEMPO REAL DO NEGÓCIO:
-{contexto_sheets}
-
-ENTENDENDO O CONTEXTO
-- RESUMO DO DIA: totais de entradas, saídas, saldo. Use diretamente.
-- ÚLTIMOS LANÇAMENTOS (até 50): movimentações recentes.
-- LANÇAMENTOS DO MÊS ATUAL: todos os registros do mês.
-- CARTEIRA DE IMÓVEIS ADMINISTRADOS: todos os imóveis com proprietário, inquilino, valor, taxa, índice, vencimento e status.
-- REPASSES DO MÊS: repasses realizados no mês atual.
-- CLIENTES CADASTRADOS: proprietários e inquilinos com IDs.
-
-CONHECIMENTO IMOBILIÁRIO
-TAXA DE ADMINISTRAÇÃO: 8% a 12% (referência CRECI). Varia por imóvel — sempre confirme antes de calcular.
-REAJUSTE ANUAL: Lei do Inquilinato (Lei 8.245/91), art. 18. Uma vez a cada 12 meses, índice do contrato (IGP-M ou IPCA).
-REVISÃO DE ALUGUEL: só após 3 anos de contrato (art. 19).
-COMISSÃO DE LOCAÇÃO: normalmente 1 mês de aluguel.
-COMISSÃO DE VENDA: 6% a 8% do valor do imóvel (tabela CRECI).
-INADIMPLÊNCIA: registre como receita pendente. Não entra no saldo.
-MULTA RESCISÓRIA: 3 meses de aluguel é o padrão.
-
-FUNÇÃO PRINCIPAL — CÁLCULO DE REPASSE
-FLUXO:
-1. Corretor menciona o imóvel → Fin identifica na carteira
-2. Confirma valor do aluguel e taxa de administração
-3. Corretor informa descontos (reparos, IPTU, condomínio)
-4. Fin calcula e apresenta demonstrativo
-5. Corretor confirma → Fin registra
-
-FORMATO DO DEMONSTRATIVO:
-🏠 Repasse — [Proprietário] / [Endereço]
-Aluguel recebido:              R$ X.XXX,XX
-(-) Taxa de administração (X%): R$ XXX,XX
-(-) [Desconto]:                R$ XXX,XX
-━━━━━━━━━━━━━━━━━━━━━
-Valor a repassar:              R$ X.XXX,XX
-Receita da imobiliária: R$ XXX,XX
-Confirma o repasse para [proprietário]?
-
-NUNCA calcule repasse sem confirmar a taxa. NUNCA invente percentuais de reajuste.
-
-GESTÃO DE IMÓVEIS
-CADASTRAR: endereço, proprietário, inquilino, aluguel, taxa, índice, vencimento, início do contrato.
-IMÓVEL VAGO: marca como vago. Não gera repasse.
-RESCISÃO: registra saída, multa se houver, marca como vago.
-
-SALDO
-Não mostre após cada lançamento. Só quando solicitado.
-
-SEM CONSELHOS JURÍDICOS
-Para dúvidas jurídicas: sugira advogado especializado em direito imobiliário.
-
-SIGILO TOTAL
-"Sou o Fin, da Oren IA. Não posso compartilhar detalhes técnicos."
-
-SUPORTE
-"Para isso você pode entrar em contato com o suporte da Oren IA pelo e-mail contato@orenia.com.br"
-
-FORMATAÇÃO DE LISTAS
-NUNCA use tabelas markdown.
-
-REGISTRO ESTRUTURADO — OBRIGATÓRIO
-DADOS_REGISTRO:{"acao":"[acao]","tipo":"[receita/despesa]","descricao":"[texto]","categoria":"[categoria]","forma_pagamento":"[forma]","bruto":[numero],"taxa":0,"liquido":0,"cliente":"[nome]","imovel":"[endereco ou id]","id_cliente":"[ID ou vazio]","data_lancamento":"[YYYY-MM-DD ou vazio]","corretor":"[nome ou vazio]","percentual_comissao":[numero ou 0],"status":"[ativo/pendente]","aluguel_bruto":[numero ou 0],"taxa_administracao":[numero ou 0],"descontos_total":[numero ou 0],"descricao_descontos":"[texto ou vazio]","proprietario":"[nome ou vazio]","inquilino":"[nome ou vazio]","endereco":"[endereco ou vazio]","valor_aluguel":[numero ou 0],"indice_reajuste":"[IPCA/IGP-M ou vazio]","dia_vencimento":[numero ou 0],"data_inicio_contrato":"[DD/MM/AAAA ou vazio]","data_fim_contrato":"[DD/MM/AAAA ou vazio]","novo_valor":[numero ou 0],"multa":[numero ou 0],"id_imovel":"[ID ou vazio]","id_proprietario":"[ID ou vazio]","id_inquilino":"[ID ou vazio]"}
-
-Ações: registrar_lancamento, registrar_repasse, cadastrar_imovel, atualizar_imovel, registrar_cliente, atualizar_cliente, inativar_lancamento, ativar_lancamento, reajuste_aluguel, registrar_rescisao
-
-GERAÇÃO DE PDF
-"📊 Gerando seu PDF, um momento..."
-GERAR_PDF:{"tipo":"[endpoint]","dados":{...}}
-Nunca inclua GERAR_PDF e DADOS_REGISTRO na mesma resposta.`;
-
+// ============================================================
+// SYSTEM PROMPT DINÂMICO
+// ============================================================
 function getSystemPrompt(ctx) {
-  const segmento = ctx.segmento || 'pet_shop';
-  if (segmento === 'imobiliaria') {
-    return SYSTEM_PROMPT_IMOBILIARIA
-      .replace('{estabelecimento}', ctx.estabelecimento || '')
-      .replace('{servicos}', ctx.servicos || '')
-      .replace('{taxa_administracao}', ctx.taxa_administracao || '10')
-      .replace('{comissao_locacao}', ctx.comissao_locacao || '100')
-      .replace('{comissao_venda}', ctx.comissao_venda || '6')
-      .replace('{contexto_sheets}', ctx.contexto || '');
-  }
   return SYSTEM_PROMPT_PETSHOP
     .replace('{estabelecimento}', ctx.estabelecimento || '')
     .replace('{segmento}', ctx.segmento || '')
@@ -682,6 +605,9 @@ function getSystemPrompt(ctx) {
     .replace('{contexto_sheets}', ctx.contexto || '');
 }
 
+// ============================================================
+// EXECUTAR TOOL NO APPS SCRIPT
+// ============================================================
 async function executarTool(toolName, toolInput, appsScriptUrl, sessionId) {
   const payload = { acao: toolName, session_id: sessionId, ...toolInput };
   console.log(`[TOOL] ${toolName} | ${JSON.stringify(payload).slice(0, 200)}`);
@@ -698,10 +624,16 @@ async function executarTool(toolName, toolInput, appsScriptUrl, sessionId) {
   }
 }
 
+// ============================================================
+// HEALTH CHECK
+// ============================================================
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Oren IA - Fin Backend v3 (tool use)' });
+  res.json({ status: 'ok', service: 'Oren IA - Fin Backend v4 (petshop)' });
 });
 
+// ============================================================
+// CONTEXTO
+// ============================================================
 app.get('/contexto', async (req, res) => {
   const { session_id = 'default', slug } = req.query;
   try {
@@ -714,6 +646,9 @@ app.get('/contexto', async (req, res) => {
   }
 });
 
+// ============================================================
+// SALVAR (mantido para compatibilidade)
+// ============================================================
 app.post('/salvar', async (req, res) => {
   const { texto, session_id = 'default', mensagem_usuario = '', slug } = req.body;
   try {
@@ -726,10 +661,12 @@ app.post('/salvar', async (req, res) => {
   }
 });
 
+// ============================================================
+// CHAT — TOOL USE (petshop)
+// ============================================================
 app.post('/chat', async (req, res) => {
   const { mensagem, historico = [], contexto = {}, session_id = 'default', slug } = req.body;
   const ctx = contexto || {};
-  const segmento = ctx.segmento || 'pet_shop';
   const systemPromptFinal = getSystemPrompt(ctx);
   const messages = [...historico, { role: 'user', content: mensagem }];
 
@@ -741,37 +678,6 @@ app.post('/chat', async (req, res) => {
   try {
     const appsScriptUrl = await resolveAppsScriptUrl(slug);
 
-    // Imobiliária — fluxo legado DADOS_REGISTRO
-    if (segmento === 'imobiliaria') {
-      let respostaCompleta = '';
-      const stream = await anthropic.messages.stream({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2048,
-        system: systemPromptFinal,
-        messages
-      });
-      for await (const chunk of stream) {
-        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
-          respostaCompleta += chunk.delta.text;
-        }
-      }
-      let textoParaStream = respostaCompleta;
-      const idxPdf = textoParaStream.indexOf('GERAR_PDF:');
-      if (idxPdf !== -1) textoParaStream = textoParaStream.slice(0, idxPdf);
-      const idxReg = textoParaStream.indexOf('DADOS_REGISTRO:');
-      if (idxReg !== -1) textoParaStream = textoParaStream.slice(0, idxReg);
-      textoParaStream = textoParaStream.trim();
-      if (textoParaStream) res.write(`data: ${JSON.stringify({ tipo: 'texto', conteudo: textoParaStream })}\n\n`);
-      const todosRegistros = [...respostaCompleta.matchAll(/DADOS_REGISTRO:({[^\n]+})/g)];
-      const matchPdf = respostaCompleta.match(/GERAR_PDF:({[\s\S]*})/);
-      const textoLimpo = respostaCompleta.replace(/\nDADOS_REGISTRO:[\s\S]*$/, '').replace(/\nGERAR_PDF:[\s\S]*$/, '').trim();
-      axios.post(appsScriptUrl, { texto: respostaCompleta, session_id, mensagem_usuario: mensagem }, { timeout: 15000 }).catch(() => {});
-      res.write(`data: ${JSON.stringify({ tipo: 'fim', texto_completo: textoLimpo, tem_registro: todosRegistros.length > 0, tem_pdf: !!matchPdf, dados_pdf: matchPdf ? matchPdf[1] : null })}\n\n`);
-      res.end();
-      return;
-    }
-
-    // Pet shop — tool use
     let textoFinal = '';
     let toolCalls = [];
     let matchPdf = null;
@@ -779,7 +685,7 @@ app.post('/chat', async (req, res) => {
 
     while (true) {
       const response = await anthropic.messages.create({
-        model: 'claude-haiku-4-5-20251001',
+        model: 'claude-sonnet-4-6',
         max_tokens: 2048,
         system: systemPromptFinal,
         tools: FIN_TOOLS,
@@ -819,7 +725,7 @@ app.post('/chat', async (req, res) => {
       messagesLoop.push({ role: 'user', content: toolResults });
     }
 
-    // Fallback: se textoFinal vazio após tools, gera confirmação mínima no server
+    // Fallback: garante que nunca retorna vazio após tools
     if (!textoFinal.trim() && toolCalls.length > 0) {
       textoFinal = '✅ Registrado com sucesso.';
     }
@@ -858,6 +764,9 @@ app.post('/chat', async (req, res) => {
   }
 });
 
+// ============================================================
+// PDF
+// ============================================================
 app.post('/pdf/:tipo', async (req, res) => {
   try {
     const { tipo } = req.params;
@@ -870,6 +779,9 @@ app.post('/pdf/:tipo', async (req, res) => {
   }
 });
 
+// ============================================================
+// NOTA FISCAL — emissão via Focus NFe
+// ============================================================
 app.post('/nota', async (req, res) => {
   const { slug, descricao, valor, cnpj_prestador, inscricao_municipal, regime_tributario, codigo_servico, aliquota_iss, cpf_tomador, nome_tomador, email_tomador } = req.body;
   const camposFaltando = [];
@@ -920,6 +832,9 @@ app.post('/nota', async (req, res) => {
   }
 });
 
+// ============================================================
+// NOTA FISCAL — consultar status
+// ============================================================
 app.get('/nota/:ref', async (req, res) => {
   if (!FOCUS_TOKEN) return res.status(500).json({ sucesso: false, erro: 'FOCUS_NFE_TOKEN não configurado.' });
   try {
@@ -931,6 +846,9 @@ app.get('/nota/:ref', async (req, res) => {
   }
 });
 
+// ============================================================
+// START
+// ============================================================
 app.listen(PORT, () => {
-  console.log(`Oren IA - Fin Backend v3 (tool use) rodando na porta ${PORT}`);
+  console.log(`Oren IA - Fin Backend v4 (petshop) rodando na porta ${PORT}`);
 });
